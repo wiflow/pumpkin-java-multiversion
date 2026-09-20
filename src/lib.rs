@@ -1,5 +1,6 @@
 #[cfg(not(target_family = "wasm"))]
 pub mod chunk;
+pub mod data;
 pub mod packet;
 pub mod registry;
 pub mod remap;
