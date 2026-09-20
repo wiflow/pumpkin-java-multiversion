@@ -1,8 +1,13 @@
 use pumpkin_util::version::JavaMinecraftVersion;
 
+pub mod block_update;
+pub mod chunk_remap;
+pub mod entity;
 pub mod legacy;
 pub mod mappings;
+pub mod status;
 pub mod translator;
+pub mod update_tags;
 
 /// Returns whether a given Java edition version is supported by this multiversion plugin.
 #[must_use]

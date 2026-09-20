@@ -1,6 +1,7 @@
 #[cfg(not(target_family = "wasm"))]
 pub mod chunk;
 pub mod packet;
+pub mod registry;
 pub mod remap;
 pub mod tag;
 
@@ -15,6 +16,7 @@ use pumpkin_plugin_api::{
 };
 
 use crate::packet::translator::{PacketTranslator, from_wasm_java_version};
+use pumpkin_util::version::JavaMinecraftVersion;
 
 /// The multi-version plugin allowing Minecraft Java clients across versions (1.7 - 26.2)
 /// to connect to a Pumpkin 26.3 server.
@@ -66,13 +68,24 @@ impl EventHandler<PacketReceivedEvent> for PacketReceivedHandler {
     ) -> PacketReceivedEventData {
         if let Some(java_player) = event.player.as_java() {
             let version = from_wasm_java_version(java_player.get_version());
-            if let Some((new_id, new_payload)) = PacketTranslator::translate_incoming_packet(
+            // PacketReceivedEvent is only fired for play-state packets.
+            match PacketTranslator::translate_incoming_packet(
                 event.packet_id,
                 &event.raw_payload,
                 version,
+                5,
             ) {
-                event.packet_id = new_id;
-                event.raw_payload = new_payload;
+                Some((new_id, new_payload)) => {
+                    event.packet_id = new_id;
+                    event.raw_payload = new_payload;
+                }
+                // No 26.3 equivalent. Forwarding it unchanged makes the server
+                // read the id as whatever packet now occupies that slot and
+                // desync the stream, so drop it instead.
+                None if version != JavaMinecraftVersion::V_26_3 => {
+                    event.cancelled = true;
+                }
+                None => {}
             }
         }
         event
@@ -84,16 +97,25 @@ struct PacketSentHandler;
 
 impl EventHandler<PacketSentEvent> for PacketSentHandler {
     fn handle(&self, _server: Server, mut event: PacketSentEventData) -> PacketSentEventData {
-        if let Some(java_player) = event.player.as_java() {
-            let version = from_wasm_java_version(java_player.get_version());
-            if let Some((new_id, new_payload)) = PacketTranslator::translate_outgoing_packet(
-                event.packet_id,
-                &event.raw_payload,
-                version,
-            ) {
+        // Login and configuration packets are sent before a Player exists, so the
+        // version comes off the event itself rather than off the player.
+        let version = JavaMinecraftVersion::from_protocol(event.protocol_version as u32);
+        if version == JavaMinecraftVersion::Unknown || version == JavaMinecraftVersion::V_26_3 {
+            return event;
+        }
+        match PacketTranslator::translate_outgoing_packet(
+            event.packet_id,
+            &event.raw_payload,
+            version,
+            event.connection_state,
+        ) {
+            Some((new_id, new_payload)) => {
                 event.packet_id = new_id;
                 event.raw_payload = new_payload;
             }
+            // No id for this version: the packet does not exist on the client.
+            // Sending it under a 26.3 id would desync the stream, so drop it.
+            None => event.cancelled = true,
         }
         event
     }

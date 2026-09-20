@@ -15,3 +15,4 @@ pub mod recipe_serializer_id_remap;
 pub mod sign;
 pub mod slot_display_id_remap;
 pub mod sound_id_remap;
+pub mod tag_id_remap;
