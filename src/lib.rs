@@ -20,7 +20,7 @@ use pumpkin_plugin_api::{
     register_plugin,
 };
 
-use crate::api::{connection_key, remove_connection};
+use crate::api::{bind_player, is_bound, remove_player};
 use crate::packet::{HIGHEST_SUPPORTED, LOWEST_SUPPORTED, is_version_supported};
 use pumpkin_protocol::ser::NetworkWriteExt;
 use pumpkin_util::version::JavaMinecraftVersion;
@@ -94,7 +94,7 @@ impl EventHandler<PacketReceivedEvent> for PacketReceivedHandler {
             return event;
         }
         match pipeline::translate_serverbound(
-            connection_key(event.player.as_ref()),
+            event.connection_id,
             version,
             event.connection_state,
             event.packet_id,
@@ -103,7 +103,6 @@ impl EventHandler<PacketReceivedEvent> for PacketReceivedHandler {
             Some(translated) => {
                 event.packet_id = translated.packet.v26_3;
                 event.raw_payload = translated.payload;
-                drop_extra(&translated.extra);
             }
             // No 26.3 equivalent. Forwarding it unchanged makes the server
             // read the id as whatever packet now occupies that slot and
@@ -132,8 +131,22 @@ impl EventHandler<PacketSentEvent> for PacketSentHandler {
         if event.connection_state == 0 {
             return event;
         }
+        #[cfg(feature = "rawdump")]
+        tracing::info!(
+            "RAWDUMP {} {} {} {}",
+            event.protocol_version,
+            event.connection_state,
+            event.packet_id,
+            hex(&event.raw_payload)
+        );
+        let key = event.connection_id;
+        if let Some(player) = &event.player
+            && !is_bound(key)
+        {
+            bind_player(key, version, player);
+        }
         match pipeline::translate_clientbound(
-            connection_key(event.player.as_ref()),
+            key,
             version,
             event.connection_state,
             event.packet_id,
@@ -142,7 +155,14 @@ impl EventHandler<PacketSentEvent> for PacketSentHandler {
             Some(translated) => {
                 event.packet_id = translated.packet.to_id(version);
                 event.raw_payload = translated.payload;
-                drop_extra(&translated.extra);
+                event.extra_packets = translated
+                    .extra
+                    .into_iter()
+                    .filter_map(|(packet, payload)| {
+                        let id = packet.to_id(version);
+                        (id != -1).then_some((id, payload))
+                    })
+                    .collect();
             }
             // No id for this version: the packet does not exist on the client.
             // Sending it under a 26.3 id would desync the stream, so drop it.
@@ -152,23 +172,12 @@ impl EventHandler<PacketSentEvent> for PacketSentHandler {
     }
 }
 
-/// Drops the queued follow-up packets until `PacketSentEvent` carries
-/// `extra-packets` (see `crates/pumpkin-plugin-wit/v0.1/event.wit`).
-fn drop_extra(extra: &[(&'static packet::mappings::PacketId, Vec<u8>)]) {
-    if !extra.is_empty() {
-        tracing::debug!(
-            "dropping {} extra packet(s): the hook cannot send them",
-            extra.len()
-        );
-    }
-}
-
 /// Forgets the per connection state a leaving player owned.
 struct PlayerLeaveHandler;
 
 impl EventHandler<PlayerLeaveEvent> for PlayerLeaveHandler {
     fn handle(&self, _server: Server, event: PlayerLeaveEventData) -> PlayerLeaveEventData {
-        remove_connection(connection_key(Some(&event.player)));
+        remove_player(&event.player);
         event
     }
 }
@@ -217,6 +226,17 @@ fn refuse_unsupported(
     event.packet_id = disconnect_id;
     event.raw_payload = payload;
     event
+}
+
+#[cfg(feature = "rawdump")]
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
 }
 
 register_plugin!(MultiVersionPlugin);

@@ -9,6 +9,10 @@ license = "MIT OR Apache-2.0"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Logs every clientbound payload before translation, for tools/probes/rawdump_to_corpus.py.
+rawdump = []
+
 [dependencies]
 pumpkin-plugin-api = { path = "../Pumpkin/crates/pumpkin-plugin-api", version = "0.2" }
 pumpkin-protocol = { path = "../Pumpkin/crates/pumpkin-protocol", version = "0.2" }

@@ -10,11 +10,3 @@ target/
 # os
 .DS_Store
 Thumbs.db
-
-# python bytecode from the probe scripts
-__pycache__/
-*.pyc
-
-# recorded packet corpora
-tools/probes/corpus/
-tools/probes/corpus-after/

@@ -36,6 +36,7 @@ pub struct UserConnection {
     pub id: u64,
     pub version: JavaMinecraftVersion,
     pub entity_tracker: EntityTracker,
+    pub bound: bool,
     storages: HashMap<TypeId, Box<dyn Any>>,
 }
 
@@ -46,6 +47,7 @@ impl UserConnection {
             id,
             version,
             entity_tracker: EntityTracker::default(),
+            bound: false,
             storages: HashMap::new(),
         }
     }
@@ -70,6 +72,7 @@ impl UserConnection {
 
 thread_local! {
     static CONNECTIONS: RefCell<HashMap<u64, UserConnection>> = RefCell::new(HashMap::new());
+    static PLAYERS: RefCell<HashMap<u64, u64>> = RefCell::new(HashMap::new());
 }
 
 /// The wasm host runs one instance per plugin and serialises calls into it.
@@ -91,14 +94,28 @@ pub fn remove_connection(key: u64) {
     CONNECTIONS.with_borrow_mut(|connections| connections.remove(&key));
 }
 
-/// Swap point: the player's uuid folded to 64 bits, or 0 before a player
-/// exists. Becomes the hook's own connection id once it carries one.
+fn player_key(player: &Player) -> u64 {
+    let uuid = player.get_id();
+    uuid.high.rotate_left(32) ^ uuid.low
+}
+
 #[must_use]
-pub fn connection_key(player: Option<&Player>) -> u64 {
-    player.map_or(0, |player| {
-        let uuid = player.get_id();
-        uuid.high.rotate_left(32) ^ uuid.low
-    })
+pub fn is_bound(key: u64) -> bool {
+    CONNECTIONS.with_borrow(|connections| connections.get(&key).is_some_and(|c| c.bound))
+}
+
+/// Remembers which player a connection belongs to, so the leave event can drop its state.
+pub fn bind_player(key: u64, version: JavaMinecraftVersion, player: &Player) {
+    let player = player_key(player);
+    with_connection(key, version, |connection| connection.bound = true);
+    PLAYERS.with_borrow_mut(|players| players.insert(player, key));
+}
+
+pub fn remove_player(player: &Player) {
+    let player = player_key(player);
+    if let Some(key) = PLAYERS.with_borrow_mut(|players| players.remove(&player)) {
+        remove_connection(key);
+    }
 }
 
 #[cfg(test)]
@@ -139,7 +156,9 @@ mod tests {
     }
 
     #[test]
-    fn no_player_is_the_pre_play_key() {
-        assert_eq!(connection_key(None), 0);
+    fn a_connection_starts_unbound() {
+        with_connection(8, JavaMinecraftVersion::V_1_20, |_| {});
+        assert!(!is_bound(8));
+        remove_connection(8);
     }
 }
