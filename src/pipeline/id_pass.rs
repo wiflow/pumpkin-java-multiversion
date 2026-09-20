@@ -8,6 +8,7 @@ use pumpkin_protocol::{ClientPacket, java::client::play::CSpawnEntity};
 use pumpkin_util::version::JavaMinecraftVersion;
 
 use crate::api::protocol::packet_key;
+use crate::api::rewriter::entity as entity_rewriter;
 use crate::api::{ComposedMappings, IdPass, PacketWrapper, TranslateError, UserConnection};
 use crate::packet::mappings::{PacketId, clientbound};
 use crate::packet::{block_update, chunk_remap, entity, join, status, update_tags};
@@ -41,6 +42,14 @@ fn table() -> &'static HashMap<usize, IdPass> {
         put(&clientbound::config::UPDATE_TAGS, tags);
         put(&clientbound::config::REGISTRY_DATA, registry_data);
         put(&clientbound::status::STATUS_RESPONSE, status_response);
+        put(
+            &clientbound::play::SET_ENTITY_DATA,
+            entity_rewriter::set_entity_data,
+        );
+        put(
+            &clientbound::play::UPDATE_ATTRIBUTES,
+            entity_rewriter::update_attributes,
+        );
         put(&clientbound::play::LOGIN, login);
         put(&clientbound::play::RESPAWN, respawn);
 
@@ -275,6 +284,9 @@ fn login(
     connection.entity_tracker.clear();
     if let Ok(entity_id) = { wrapper.remaining() }.get_i32_be() {
         connection.entity_tracker.client_entity_id = Some(entity_id);
+        connection
+            .entity_tracker
+            .add(entity_id, EntityType::PLAYER.id);
     }
     if let Some((min_y, height)) = join::login_dimension_bounds(wrapper.remaining(), layout) {
         connection.entity_tracker.min_y = min_y;
@@ -297,6 +309,12 @@ fn respawn(
     _ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
     connection.entity_tracker.clear();
+    // The client's own entity is never spawned again, only the world is.
+    if let Some(entity_id) = connection.entity_tracker.client_entity_id {
+        connection
+            .entity_tracker
+            .add(entity_id, EntityType::PLAYER.id);
+    }
     if layout >= join::FIRST_WITH_DIMENSION_NAME {
         wrapper.passthrough_all();
         return Ok(());
@@ -392,6 +410,25 @@ mod tests {
         assert!(connection.entity_tracker.entity_type(12).is_none());
         assert_eq!(connection.entity_tracker.entity_type(13), Some(3));
         assert_eq!(wrapper.finish().unwrap().unwrap().payload, payload);
+    }
+
+    #[test]
+    fn a_respawn_forgets_every_entity_but_the_player() {
+        let version = JavaMinecraftVersion::V_1_20_2;
+        let mut connection = UserConnection::new(0, version);
+        connection.entity_tracker.client_entity_id = Some(1);
+        connection.entity_tracker.add(1, EntityType::PLAYER.id);
+        connection.entity_tracker.add(11, EntityType::PIG.id);
+
+        let ids = crate::api::MappingData::get().composed(version);
+        let mut wrapper = PacketWrapper::new(&clientbound::play::RESPAWN, &[1, 2, 3]);
+        respawn(&mut wrapper, &mut connection, version, ids).unwrap();
+
+        assert_eq!(
+            connection.entity_tracker.entity_type(1),
+            Some(EntityType::PLAYER.id)
+        );
+        assert!(connection.entity_tracker.entity_type(11).is_none());
     }
 
     #[test]

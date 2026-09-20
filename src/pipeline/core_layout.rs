@@ -53,6 +53,10 @@ fn table() -> &'static HashMap<usize, JavaMinecraftVersion> {
         put(&clientbound::play::RESET_SCORE, V::V_1_20_3);
         // java/client/play/update_score.rs: branches at 1.20.3 and 1.7.6.
         put(&clientbound::play::SET_SCORE, V::V_1_7_2);
+        // java/client/play/entity_metadata.rs: the 1.8 entity id, and Metadata::write branches at 1.9.
+        put(&clientbound::play::SET_ENTITY_DATA, V::V_1_7_2);
+        // java/client/play/update_attributes.rs: branches at 1.7.6, 1.16, 1.17, 1.20.5 and 1.21.
+        put(&clientbound::play::UPDATE_ATTRIBUTES, V::V_1_7_2);
         // java/client/play/recipe_book_add.rs: no branch on the container.
         put(&clientbound::play::RECIPE_BOOK_ADD, V::V_26_3);
 
