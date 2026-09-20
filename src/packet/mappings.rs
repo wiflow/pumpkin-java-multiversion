@@ -340,8 +340,8 @@ pub mod serverbound {
             v1_19_3: -1i32,
             v1_19_4: -1i32,
             v1_20: -1i32,
-            v1_20_2: 4i32,
-            v1_20_3: 4i32,
+            v1_20_2: -1i32,
+            v1_20_3: -1i32,
             v1_20_5: 4i32,
             v1_21: 4i32,
             v1_21_2: 4i32,
@@ -1591,7 +1591,7 @@ pub mod serverbound {
             v1_20: 4i32,
             v1_20_2: 4i32,
             v1_20_3: 4i32,
-            v1_20_5: 5i32,
+            v1_20_5: 4i32,
             v1_21: 4i32,
             v1_21_2: 5i32,
             v1_21_4: 5i32,
@@ -1645,7 +1645,7 @@ pub mod serverbound {
             v1_20: -1i32,
             v1_20_2: -1i32,
             v1_20_3: -1i32,
-            v1_20_5: -1i32,
+            v1_20_5: 5i32,
             v1_21: 5i32,
             v1_21_2: 6i32,
             v1_21_4: 6i32,
@@ -5506,8 +5506,8 @@ pub mod clientbound {
             v1_19_3: -1i32,
             v1_19_4: -1i32,
             v1_20: -1i32,
-            v1_20_2: 5i32,
-            v1_20_3: 5i32,
+            v1_20_2: -1i32,
+            v1_20_3: -1i32,
             v1_20_5: 5i32,
             v1_21: 5i32,
             v1_21_2: 5i32,
@@ -11361,6 +11361,14 @@ pub mod clientbound {
             v26_2: 68i32,
             v26_3: 69i32,
         };
+        /// Hand edited: `v26_3` is `PLAYER_INFO_UPDATE`'s id on purpose.
+        ///
+        /// 1.19.3 split PLAYER_INFO into PLAYER_INFO_UPDATE and
+        /// PLAYER_INFO_REMOVE. Core writes the pre-1.19.3 action-enum layout
+        /// under the update packet's 26.3 id, and the outbound lookup walks
+        /// the table until a row has an id for the client's version, so this
+        /// row is what a 1.16.2 to 1.19.2 client gets and the update row is
+        /// what everyone else gets. Keep this when regenerating.
         pub const PLAYER_INFO: super::super::PacketId = super::super::PacketId {
             v1_7_2: 56i32,
             v1_7_6: 56i32,
@@ -11413,7 +11421,7 @@ pub mod clientbound {
             v1_21_11: -1i32,
             v26_1: -1i32,
             v26_2: -1i32,
-            v26_3: -1i32,
+            v26_3: 71i32,
         };
         pub const PLAYER_INFO_REMOVE: super::super::PacketId = super::super::PacketId {
             v1_7_2: -1i32,

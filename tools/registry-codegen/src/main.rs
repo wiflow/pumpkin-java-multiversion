@@ -52,15 +52,119 @@ const SYNCED_REGISTRIES: &[&str] = &[
     "worldgen/block_state_provider",
 ];
 
-/// Datapack folder name paired with the `JavaMinecraftVersion` variant suffix.
-const VERSIONS: &[(&str, &str)] = &[
-    ("1_21_5", "V_1_21_5"),
-    ("1_21_6", "V_1_21_6"),
-    ("1_21_7", "V_1_21_7"),
-    ("1_21_9", "V_1_21_9"),
-    ("1_21_11", "V_1_21_11"),
-    ("26_1", "V_26_1"),
-    ("26_2", "V_26_2"),
+/// One generated `REGISTRY_V_*` static: which datapack folder its registries
+/// and tags come from, and the per-registry exceptions.
+struct VersionSpec {
+    /// Datapack folder under `assets/datapacks`, also the source for the tag
+    /// registry list and the extra tags.
+    folder: &'static str,
+    /// `JavaMinecraftVersion` variant name.
+    ident: &'static str,
+    /// Registries whose JSON lives in another version's folder, because this
+    /// version shares that folder's shape for that one registry only.
+    registry_overrides: &'static [(&'static str, &'static str)],
+    /// `(registry, field)` pairs to strip from every entry of that registry:
+    /// a field the source folder has and this version's codec does not.
+    dropped_fields: &'static [(&'static str, &'static str)],
+}
+
+const fn spec(folder: &'static str, ident: &'static str) -> VersionSpec {
+    VersionSpec {
+        folder,
+        ident,
+        registry_overrides: &[],
+        dropped_fields: &[],
+    }
+}
+
+/// `chat_type` took the flat `{chat, narration}` shape in 1.19.1, three
+/// releases before the biome and dimension shapes changed, so 1.19.1 and
+/// 1.19.3 take their biomes and dimension types from the 1.19 datapack and
+/// their chat types from the 1.20 one. Checked against the vanilla codec
+/// dumps in minecraft-data (`pc/1.19` vs `pc/1.19.2` `loginPacket.json`):
+/// 1.19 has the nested `decoration`/`priority` form and the eight 1.19 names,
+/// 1.19.2 already has the flat form and the `*_incoming`/`*_outgoing` names.
+const CHAT_TYPE_FROM_1_20: &[(&str, &str)] = &[("chat_type", "1_20")];
+
+/// The `1_20` datapack folder holds 1.19.4's data, not 1.20's: 63 biomes and
+/// 42 damage types, where vanilla 1.20 has 64 and 44, and no `trim_pattern` or
+/// `trim_material` at all. Checked entry by entry against the vanilla codec
+/// dumps in minecraft-data: `pc/1.19.4/loginPacket.json` matches that folder
+/// exactly, `pc/1.20/loginPacket.json` is short `cherry_grove`,
+/// `generic_kill`, `outside_border` and the trim registries.
+///
+/// So 1.19.4 takes the folder as it is and only borrows the trims, while 1.20
+/// takes every registry that differs from the 1.20.2 folder, whose contents
+/// are vanilla 1.20's with one field added: `decal` on a trim pattern. That
+/// field is stripped rather than left for the client's codec to ignore, and
+/// with it the two agree field for field on all six registries.
+const TRIM_FROM_1_20_2: &[(&str, &str)] =
+    &[("trim_pattern", "1_20_2"), ("trim_material", "1_20_2")];
+const REGISTRIES_FROM_1_20_2: &[(&str, &str)] = &[
+    ("worldgen/biome", "1_20_2"),
+    ("damage_type", "1_20_2"),
+    ("trim_pattern", "1_20_2"),
+    ("trim_material", "1_20_2"),
+];
+const TRIM_DECAL: &[(&str, &str)] = &[("trim_pattern", "decal")];
+
+const VERSIONS: &[VersionSpec] = &[
+    // 1.16.2 to 1.16.5 share one layout: biomes still carry `depth`,
+    // `scale` and `category`, dimension types have no `min_y`/`height`, and
+    // the codec holds nothing but `dimension_type` and `worldgen/biome`
+    // (minecraft-data `pc/1.16.2/loginPacket.json`).
+    spec("1_16_2", "V_1_16_2"),
+    spec("1_16_2", "V_1_16_3"),
+    spec("1_16_2", "V_1_16_4"),
+    // 1.17 added `min_y`/`height` to the dimension type.
+    spec("1_17", "V_1_17"),
+    spec("1_17", "V_1_17_1"),
+    // 1.18 dropped `depth`/`scale` from biomes.
+    spec("1_18", "V_1_18"),
+    spec("1_18", "V_1_18_2"),
+    // 1.19 dropped `category`, added `monster_spawn_*` and `chat_type`.
+    spec("1_19", "V_1_19"),
+    VersionSpec {
+        folder: "1_19",
+        ident: "V_1_19_1",
+        registry_overrides: CHAT_TYPE_FROM_1_20,
+        dropped_fields: &[],
+    },
+    VersionSpec {
+        folder: "1_19",
+        ident: "V_1_19_3",
+        registry_overrides: CHAT_TYPE_FROM_1_20,
+        dropped_fields: &[],
+    },
+    // 1.19.4 replaced biome `precipitation` with `has_precipitation` and
+    // added `damage_type`, `trim_pattern` and `trim_material`.
+    VersionSpec {
+        folder: "1_20",
+        ident: "V_1_19_4",
+        registry_overrides: TRIM_FROM_1_20_2,
+        dropped_fields: TRIM_DECAL,
+    },
+    // Tags still come from the 1_20 folder: the two have the same tag
+    // registries, and the extra tags are that version's own.
+    VersionSpec {
+        folder: "1_20",
+        ident: "V_1_20",
+        registry_overrides: REGISTRIES_FROM_1_20_2,
+        dropped_fields: TRIM_DECAL,
+    },
+    spec("1_20_2", "V_1_20_2"),
+    spec("1_20_3", "V_1_20_3"),
+    spec("1_20_5", "V_1_20_5"),
+    spec("1_21", "V_1_21"),
+    spec("1_21_2", "V_1_21_2"),
+    spec("1_21_4", "V_1_21_4"),
+    spec("1_21_5", "V_1_21_5"),
+    spec("1_21_6", "V_1_21_6"),
+    spec("1_21_7", "V_1_21_7"),
+    spec("1_21_9", "V_1_21_9"),
+    spec("1_21_11", "V_1_21_11"),
+    spec("26_1", "V_26_1"),
+    spec("26_2", "V_26_2"),
 ];
 
 fn json_to_nbt_tag(v: &Value) -> pumpkin_nbt::tag::NbtTag {
@@ -108,13 +212,19 @@ fn entry_bytes(entry_data: &Value) -> Vec<u8> {
     }
 }
 
-fn process_version(ver_folder: &str) -> TokenStream {
-    let base_path = Path::new("assets/datapacks").join(ver_folder).join("data/minecraft");
-
+fn process_version(version: &VersionSpec) -> TokenStream {
     let mut data: IndexMap<String, IndexMap<String, Value>> = IndexMap::new();
 
     for &reg_name in SYNCED_REGISTRIES {
-        let reg_dir = base_path.join(reg_name);
+        let folder = version
+            .registry_overrides
+            .iter()
+            .find(|(registry, _)| *registry == reg_name)
+            .map_or(version.folder, |(_, folder)| *folder);
+        let reg_dir = Path::new("assets/datapacks")
+            .join(folder)
+            .join("data/minecraft")
+            .join(reg_name);
         if !reg_dir.is_dir() {
             continue;
         }
@@ -133,8 +243,15 @@ fn process_version(ver_folder: &str) -> TokenStream {
                 continue;
             };
             if let Ok(content) = fs::read_to_string(&path)
-                && let Ok(val) = serde_json::from_str::<Value>(&content)
+                && let Ok(mut val) = serde_json::from_str::<Value>(&content)
             {
+                for (registry, field) in version.dropped_fields {
+                    if *registry == reg_name
+                        && let Some(object) = val.as_object_mut()
+                    {
+                        object.remove(*field);
+                    }
+                }
                 entries.insert(stem, val);
             }
         }
@@ -190,7 +307,11 @@ fn tag_registries(ver_folder: &str) -> Vec<String> {
     let mut keys = std::collections::BTreeSet::new();
     let mut stack = vec![tags_dir.clone()];
     while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir).into_iter().flatten().filter_map(Result::ok) {
+        for entry in fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+        {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
@@ -244,7 +365,12 @@ fn tag_members(tags_dir: &Path, registry: &str, tag: &str, depth: usize) -> Vec<
         return Vec::new();
     };
     let mut members = Vec::new();
-    for value in json.get("values").and_then(Value::as_array).into_iter().flatten() {
+    for value in json
+        .get("values")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         let name = match value {
             Value::String(s) => s.as_str(),
             Value::Object(o) => o.get("id").and_then(Value::as_str).unwrap_or(""),
@@ -267,14 +393,20 @@ fn tag_members(tags_dir: &Path, registry: &str, tag: &str, depth: usize) -> Vec<
 /// reference them (`enchantable/sword` on 1.21.5), and the client fails the
 /// whole registry load when a referenced tag never arrives.
 fn extra_tags(ver_folder: &str) -> Vec<(String, String, Vec<u16>)> {
-    let old_dir = Path::new("assets/datapacks").join(ver_folder).join("data/minecraft/tags");
+    let old_dir = Path::new("assets/datapacks")
+        .join(ver_folder)
+        .join("data/minecraft/tags");
     let new_dir = Path::new("assets/datapacks/26_3/data/minecraft/tags");
     let mut out = Vec::new();
     for &registry in STATIC_TAG_REGISTRIES {
         let reg_dir = old_dir.join(registry);
         let mut stack = vec![reg_dir.clone()];
         while let Some(dir) = stack.pop() {
-            for entry in fs::read_dir(&dir).into_iter().flatten().filter_map(Result::ok) {
+            for entry in fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+            {
                 let path = entry.path();
                 if path.is_dir() {
                     stack.push(path);
@@ -289,10 +421,7 @@ fn extra_tags(ver_folder: &str) -> Vec<(String, String, Vec<u16>)> {
                 if new_dir.join(registry).join(rel).exists() {
                     continue;
                 }
-                let tag = rel
-                    .with_extension("")
-                    .to_string_lossy()
-                    .replace('\\', "/");
+                let tag = rel.with_extension("").to_string_lossy().replace('\\', "/");
                 let members = tag_members(&old_dir, registry, &tag, 0);
                 out.push((registry.to_string(), tag, members));
             }
@@ -308,13 +437,15 @@ fn main() {
     let mut tag_arms = TokenStream::new();
     let mut extra_arms = TokenStream::new();
 
-    for (ver_folder, ident_str) in VERSIONS {
+    for version in VERSIONS {
+        let ver_folder = version.folder;
+        let ident_str = version.ident;
         if !Path::new("assets/datapacks").join(ver_folder).is_dir() {
             eprintln!("skipping {ver_folder}: no datapack folder");
             continue;
         }
-        eprintln!("generating registries for {ver_folder}");
-        let registries = process_version(ver_folder);
+        eprintln!("generating registries for {ident_str} from {ver_folder}");
+        let registries = process_version(version);
         let ident = format_ident!("REGISTRY_{ident_str}");
         statics.extend(quote! {
             pub static #ident: &[StaticRegistry] = #registries;

@@ -4,7 +4,10 @@ use pumpkin_protocol::{
 };
 use pumpkin_util::{math::position::BlockPos, version::JavaMinecraftVersion};
 
-use crate::packet::legacy::{CSpawnLivingEntity, CSpawnPainting};
+use crate::packet::legacy::{
+    CSpawnExperienceOrb, CSpawnLivingEntity, CSpawnPainting, CSpawnPlayer, DEFAULT_VARIANT,
+    direction_2d_from_3d_index,
+};
 use crate::packet::mappings::{self, PacketId};
 use crate::remap::{
     self, block_state_remap::remap_block_state_for_version,
@@ -398,6 +401,14 @@ pub static CLIENTBOUND_PLAY: &[&PacketId] = &[
 
 pub struct PacketTranslator;
 
+/// Whether a type is a `LivingEntity` on the client, which is what decides
+/// between `SPAWN_LIVING_ENTITY` and `SPAWN_ENTITY` below 1.19. Every living
+/// type has attributes (health at least) and no other type does; `mob` alone
+/// misses armor stands.
+fn is_living_type(entity_type: &EntityType) -> bool {
+    entity_type.mob || !entity_type.attributes.is_empty()
+}
+
 impl PacketTranslator {
     /// Translates an incoming serverbound packet ID from a specific client version into the 26.3 packet ID.
     #[must_use]
@@ -548,6 +559,13 @@ impl PacketTranslator {
             return None;
         }
 
+        // Serverbound layouts that changed on the way down (`use_item` gained
+        // a rotation in 767, `enchant_item` widened its fields, and 1.20.5 is
+        // where `chat_command` split into a signed and an unsigned form) are
+        // core's readers' business: they branch on the client's version
+        // themselves. Nothing is rewritten here, so tiers 2 and 3 need no work
+        // on this side; the id table is what carries the difference, and it
+        // matches minecraft-data exactly for 1.20.2 and 1.20.4.
         let new_id = Self::translate_serverbound_packet_id(packet_id, version, state)?;
         // Only the id changes. Pumpkin decodes every serverbound packet with
         // the client's own version and each reader carries the older layouts
@@ -574,42 +592,89 @@ impl PacketTranslator {
             return None;
         }
 
-        // Check for CSpawnEntity (ADD_ENTITY) in 26.3. Play state only: the
-        // same id means something else in login/config.
+        // Check for CSpawnEntity (ADD_ENTITY). Play state only: the same id
+        // means something else in login/config. Core wrote the payload in the
+        // client's layout, so it is decoded with the client's version.
+        //
+        // The 1.20.2, 1.20.3 and 1.20.5 wire layouts of this packet are
+        // identical to 1.21's (minecraft-data 1.20.2, 1.20.3, 1.20.6 and
+        // 1.21.1 agree field for field: id, uuid, type, three f64, three
+        // angles, varint data, vec3i16 velocity), and both core's writer and
+        // its reader branch at 1.9, 1.14, 1.19 and 1.21.9 only, so protocols
+        // 764, 765 and 766 need no branch of their own. When the decode does
+        // not line up the packet is left to the byte level fallback further
+        // down, which rewrites just the type field.
         if state == 5
             && packet_id == mappings::clientbound::play::ADD_ENTITY.v26_3
-            && let Ok(spawn_entity) =
-                CSpawnEntity::read_packet_data(raw_payload, &JavaMinecraftVersion::V_26_3)
+            && let Ok(spawn_entity) = CSpawnEntity::read_packet_data(raw_payload, &version)
         {
             let entity_type_id = spawn_entity.r#type.0 as u16;
 
-            // 1. Check if entity is a Painting in <= 1.18.2
+            // 0. Players have their own spawn packet below 1.20.2, and
+            // experience orbs below 1.21.5. Without these wrappers other
+            // players and orbs are invisible: ADD_ENTITY with the player
+            // type is not something those clients accept.
+            if version < JavaMinecraftVersion::V_1_20_2 && entity_type_id == EntityType::PLAYER.id {
+                let player = CSpawnPlayer::new(
+                    spawn_entity.entity_id,
+                    spawn_entity.entity_uuid,
+                    spawn_entity.position,
+                    spawn_entity.yaw,
+                    spawn_entity.pitch,
+                );
+                let mut buf = Vec::new();
+                if player.write_packet_data(&mut buf, &version).is_ok() {
+                    return Some((CSpawnPlayer::to_id(version), buf));
+                }
+                return None;
+            }
+            if version < JavaMinecraftVersion::V_1_21_5
+                && entity_type_id == EntityType::EXPERIENCE_ORB.id
+            {
+                let count = i16::try_from(spawn_entity.data.0).unwrap_or(i16::MAX);
+                let orb =
+                    CSpawnExperienceOrb::new(spawn_entity.entity_id, spawn_entity.position, count);
+                let mut buf = Vec::new();
+                if orb.write_packet_data(&mut buf, &version).is_ok() {
+                    return Some((CSpawnExperienceOrb::to_id(version), buf));
+                }
+                return None;
+            }
+
+            // 1. Paintings have their own packet in <= 1.18.2. Its direction
+            // is the 2D facing, while ADD_ENTITY's data field carries the 3D
+            // one; the variant lives in metadata from 1.19 and cannot be
+            // recovered here, so every painting shows the default (kebab).
             if version <= JavaMinecraftVersion::V_1_18_2
                 && entity_type_id == EntityType::PAINTING.id
             {
+                let direction = direction_2d_from_3d_index(spawn_entity.data.0)?;
                 let painting = CSpawnPainting::new(
                     spawn_entity.entity_id,
                     spawn_entity.entity_uuid,
                     String::new(),
-                    spawn_entity.data,
+                    DEFAULT_VARIANT,
                     BlockPos::new(
                         spawn_entity.position.x.floor() as i32,
                         spawn_entity.position.y.floor() as i32,
                         spawn_entity.position.z.floor() as i32,
                     ),
-                    spawn_entity.yaw,
+                    direction,
                 );
                 let mut buf = Vec::new();
                 if painting.write_packet_data(&mut buf, &version).is_ok() {
                     let target_id = CSpawnPainting::to_id(version);
                     return Some((target_id, buf));
                 }
+                return None;
             }
 
-            // 2. Check if entity is a living mob in < 1.19
+            // 2. Every living entity except the player uses SPAWN_LIVING_ENTITY
+            // below 1.19 (vanilla's LivingEntity::getAddEntityPacket), armor
+            // stands included, which `EntityType::mob` does not cover.
             if version < JavaMinecraftVersion::V_1_19 {
-                let is_mob = EntityType::from_raw(entity_type_id).is_some_and(|e| e.mob);
-                if is_mob {
+                let is_living = EntityType::from_raw(entity_type_id).is_some_and(is_living_type);
+                if is_living {
                     let living = CSpawnLivingEntity::new(
                         spawn_entity.entity_id,
                         spawn_entity.entity_uuid,
@@ -670,7 +735,12 @@ impl PacketTranslator {
 
         // Status ping: report the client's own protocol so the server list shows
         // it as joinable instead of "Incompatible version!".
-        if state == 1 && packet_id == mappings::clientbound::status::STATUS_RESPONSE.v26_3 {
+        // Versions below the supported floor keep the 26.3 response and show
+        // "Incompatible version!", which is what they would get on joining.
+        if state == 1
+            && packet_id == mappings::clientbound::status::STATUS_RESPONSE.v26_3
+            && crate::packet::is_version_supported(version)
+        {
             let target_id = mappings::clientbound::status::STATUS_RESPONSE.to_id(version);
             if target_id != -1
                 && let Some(payload) =
@@ -697,49 +767,59 @@ impl PacketTranslator {
         // Single and multi block changes carry raw state ids too. Without these
         // the client's world drifts from the server's after any block changes,
         // so what you aim at stops matching what the server thinks is there.
-        // Gated at 1.21.5: the parsers below assume that wire layout, and older
-        // clients get length prefixed arrays and a light-update bool instead.
-        if state == 5 && version >= JavaMinecraftVersion::V_1_21_5 {
+        // Core writes them in the client's layout and the parsers follow the
+        // same branches; a payload that does not parse is dropped, never sent
+        // with 26.3 ids.
+        if state == 5 && version >= crate::packet::block_update::OLDEST_LAYOUT {
             if packet_id == mappings::clientbound::play::BLOCK_UPDATE.v26_3 {
                 let target_id = mappings::clientbound::play::BLOCK_UPDATE.to_id(version);
-                if target_id != -1
-                    && let Some(payload) =
-                        crate::packet::block_update::remap_block_update(raw_payload, version)
-                {
-                    return Some((target_id, payload));
+                if target_id == -1 {
+                    return None;
                 }
+                let payload =
+                    crate::packet::block_update::remap_block_update(raw_payload, version)?;
+                return Some((target_id, payload));
             }
             if packet_id == mappings::clientbound::play::LEVEL_EVENT.v26_3 {
                 let target_id = mappings::clientbound::play::LEVEL_EVENT.to_id(version);
-                if target_id != -1
-                    && let Some(payload) =
-                        crate::packet::block_update::remap_level_event(raw_payload, version)
-                {
-                    return Some((target_id, payload));
+                if target_id == -1 {
+                    return None;
                 }
+                let payload = crate::packet::block_update::remap_level_event(raw_payload, version)?;
+                return Some((target_id, payload));
             }
             if packet_id == mappings::clientbound::play::SECTION_BLOCKS_UPDATE.v26_3 {
                 let target_id = mappings::clientbound::play::SECTION_BLOCKS_UPDATE.to_id(version);
-                if target_id != -1
-                    && let Some(payload) = crate::packet::block_update::remap_section_blocks_update(
-                        raw_payload,
-                        version,
-                    )
-                {
-                    return Some((target_id, payload));
+                if target_id == -1 {
+                    return None;
                 }
+                let payload =
+                    crate::packet::block_update::remap_section_blocks_update(raw_payload, version)?;
+                return Some((target_id, payload));
             }
         }
 
-        // Chunk sections carry raw block state ids, which shift between
-        // versions. From 1.21.5 the wire layout matches what the remapper parses,
-        // so only the palettes need rewriting for these clients. A chunk the
-        // remapper cannot handle (a direct palette section) is dropped rather
-        // than sent with 26.3 ids the client would crash on.
+        // 1.20.2 has no RESET_SCORE; it clears a score with SET_SCORE action
+        // 1. Rewrite rather than drop, or scores never clear on that client.
         if state == 5
-            && version >= JavaMinecraftVersion::V_1_21_5
-            && packet_id == mappings::clientbound::play::LEVEL_CHUNK_WITH_LIGHT.v26_3
+            && packet_id == mappings::clientbound::play::RESET_SCORE.v26_3
+            && version < crate::packet::score::FIRST_WITH_RESET_SCORE
         {
+            let target_id = mappings::clientbound::play::SET_SCORE.to_id(version);
+            if target_id == -1 {
+                return None;
+            }
+            return crate::packet::score::rewrite_reset_score(raw_payload)
+                .map(|payload| (target_id, payload));
+        }
+
+        // Chunk sections carry raw block state ids, which shift between
+        // versions. Core writes the chunk in the client's layout and the
+        // remapper follows the same branches, so only the palettes need
+        // rewriting. A chunk the remapper cannot handle (a direct palette
+        // section, a layout older than it knows) is dropped rather than sent
+        // with 26.3 ids the client would crash on.
+        if state == 5 && packet_id == mappings::clientbound::play::LEVEL_CHUNK_WITH_LIGHT.v26_3 {
             let target_id = mappings::clientbound::play::LEVEL_CHUNK_WITH_LIGHT.to_id(version);
             if target_id == -1 {
                 return None;
@@ -748,12 +828,52 @@ impl PacketTranslator {
                 .map(|payload| (target_id, payload));
         }
 
+        // Clients without a configuration state get their registries inside
+        // the play LOGIN packet, as the NBT dimension codec, and 1.16.2 to
+        // 1.18.2 get the current dimension's own element inline there and in
+        // RESPAWN. Same problem as REGISTRY_DATA below, different carrier: the
+        // 26.3 NBT core writes fails the client's registry load outright, so
+        // the codec and the inline element are replaced with that version's
+        // own. A payload that does not parse in full is dropped.
+        if state == 5 && version < crate::packet::join::FIRST_WITH_CONFIG_STATE {
+            if packet_id == mappings::clientbound::play::LOGIN.v26_3 {
+                let target_id = mappings::clientbound::play::LOGIN.to_id(version);
+                if target_id == -1 {
+                    return None;
+                }
+                return crate::packet::join::rewrite_login(raw_payload, version)
+                    .map(|payload| (target_id, payload));
+            }
+            if packet_id == mappings::clientbound::play::RESPAWN.v26_3
+                && version < crate::packet::join::FIRST_WITH_DIMENSION_NAME
+            {
+                let target_id = mappings::clientbound::play::RESPAWN.to_id(version);
+                if target_id == -1 {
+                    return None;
+                }
+                return crate::packet::join::rewrite_respawn(raw_payload, version)
+                    .map(|payload| (target_id, payload));
+            }
+        }
+
         // Registry contents are version specific. A 26.3 entry carries NBT an
         // older client cannot decode, and the client rejects the whole registry
         // load rather than the single bad entry, so send that version's own data.
         if state == 4 && packet_id == mappings::clientbound::config::REGISTRY_DATA.v26_3 {
             let target_id = mappings::clientbound::config::REGISTRY_DATA.to_id(version);
             if target_id != -1 {
+                // 1.20.2 to 1.20.4 get every registry in one NBT compound
+                // instead of one packet each, and core writes that bundle for
+                // them in the vanilla layout. The rewriter leaves out the
+                // registries the version does not have and replaces every
+                // entry's element with that version's own NBT. A bundle that
+                // cannot be parsed in full is dropped, never half rewritten.
+                if version >= JavaMinecraftVersion::V_1_20_2
+                    && version < JavaMinecraftVersion::V_1_20_5
+                {
+                    return crate::registry::build_registry_bundle_payload(version, raw_payload)
+                        .map(|payload| (target_id, payload));
+                }
                 match crate::registry::build_registry_payload(version, raw_payload) {
                     Some(Some(payload)) => return Some((target_id, payload)),
                     // This version has no such registry; drop rather than send it.
@@ -800,5 +920,21 @@ impl PacketTranslator {
         // Generic packet ID translation
         let client_id = Self::translate_clientbound_packet_id(packet_id, version, state)?;
         Some((client_id, raw_payload.to_vec()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pumpkin_data::entity::EntityType;
+
+    #[test]
+    fn living_types_include_armor_stands_but_not_objects() {
+        assert!(super::is_living_type(&EntityType::ARMOR_STAND));
+        assert!(super::is_living_type(&EntityType::PIG));
+        assert!(super::is_living_type(&EntityType::VILLAGER));
+        assert!(!super::is_living_type(&EntityType::ARROW));
+        assert!(!super::is_living_type(&EntityType::ITEM));
+        assert!(!super::is_living_type(&EntityType::OAK_BOAT));
+        assert!(!super::is_living_type(&EntityType::PAINTING));
     }
 }
