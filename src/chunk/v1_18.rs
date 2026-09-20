@@ -1,6 +1,6 @@
 use super::util::write_compound_nbt;
-use crate::remap::block_state_remap::remap_block_state_for_version;
 use crate::remap::block_entity_type_id_remap::remap_block_entity_type_id_for_version;
+use crate::remap::block_state_remap::remap_block_state_for_version;
 const CURRENT_MC_VERSION: JavaMinecraftVersion = JavaMinecraftVersion::V_26_3;
 use pumpkin_protocol::codec::bit_set::BitSet;
 use pumpkin_protocol::codec::var_int::VarInt;
@@ -230,10 +230,7 @@ pub fn write_chunk_data(
                 .position(|&n| n == name)
                 .unwrap_or(0)
         });
-        let remapped_id =
-            remap_block_entity_type_id_for_version(
-                id as u32, *version,
-            );
+        let remapped_id = remap_block_entity_type_id_for_version(id as u32, *version);
 
         write.write_var_int(&VarInt(remapped_id as i32))?;
 

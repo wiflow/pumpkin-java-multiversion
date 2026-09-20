@@ -1,13 +1,10 @@
 use pumpkin_data::entity::EntityType;
 use pumpkin_protocol::{
-    ClientPacket, MultiVersionJavaPacket, VarInt,
-    java::client::play::CSpawnEntity,
+    ClientPacket, MultiVersionJavaPacket, VarInt, java::client::play::CSpawnEntity,
 };
 use pumpkin_util::{math::position::BlockPos, version::JavaMinecraftVersion};
 
-use crate::packet::legacy::{
-    CSpawnLivingEntity, CSpawnPainting,
-};
+use crate::packet::legacy::{CSpawnLivingEntity, CSpawnPainting};
 use crate::packet::mappings::{self, PacketId};
 use crate::remap::{
     self, block_state_remap::remap_block_state_for_version,
@@ -77,9 +74,7 @@ pub const fn from_wasm_java_version(
     }
 }
 
-pub static SERVERBOUND_HANDSHAKE: &[&PacketId] = &[
-    &mappings::serverbound::handshake::INTENTION,
-];
+pub static SERVERBOUND_HANDSHAKE: &[&PacketId] = &[&mappings::serverbound::handshake::INTENTION];
 
 pub static SERVERBOUND_STATUS: &[&PacketId] = &[
     &mappings::serverbound::status::PING_REQUEST,
@@ -406,7 +401,10 @@ pub struct PacketTranslator;
 impl PacketTranslator {
     /// Translates an incoming serverbound packet ID from a specific client version into the 26.3 packet ID.
     #[must_use]
-    pub fn translate_serverbound_packet_id(packet_id: i32, version: JavaMinecraftVersion) -> Option<i32> {
+    pub fn translate_serverbound_packet_id(
+        packet_id: i32,
+        version: JavaMinecraftVersion,
+    ) -> Option<i32> {
         if version == JavaMinecraftVersion::V_26_3 {
             return Some(packet_id);
         }
@@ -440,7 +438,10 @@ impl PacketTranslator {
 
     /// Translates an outgoing 26.3 clientbound packet ID into the target client version packet ID.
     #[must_use]
-    pub fn translate_clientbound_packet_id(packet_id_26_3: i32, version: JavaMinecraftVersion) -> Option<i32> {
+    pub fn translate_clientbound_packet_id(
+        packet_id_26_3: i32,
+        version: JavaMinecraftVersion,
+    ) -> Option<i32> {
         if version == JavaMinecraftVersion::V_26_3 {
             return Some(packet_id_26_3);
         }
@@ -530,7 +531,8 @@ impl PacketTranslator {
     /// Translates a custom stat ID from 26.3 to the client's version.
     #[must_use]
     pub fn translate_custom_stat_id(stat_id: u16, version: JavaMinecraftVersion) -> u16 {
-        remap::custom_stat_id_remap::remap_custom_stat_id_for_version(u32::from(stat_id), version) as u16
+        remap::custom_stat_id_remap::remap_custom_stat_id_for_version(u32::from(stat_id), version)
+            as u16
     }
 
     /// Translates a painting variant ID from 26.3 to the client's version.
@@ -570,7 +572,9 @@ impl PacketTranslator {
         }
 
         // 2. ACCEPT_TELEPORTATION (< 26.3 only sent teleport_id: VarInt)
-        if new_id == mappings::serverbound::play::ACCEPT_TELEPORTATION.v26_3 && version < JavaMinecraftVersion::V_26_3 {
+        if new_id == mappings::serverbound::play::ACCEPT_TELEPORTATION.v26_3
+            && version < JavaMinecraftVersion::V_26_3
+        {
             let teleport_id = payload.get_var_int().ok()?;
             let mut out = Vec::new();
             let _ = out.write_var_int(&teleport_id);
@@ -583,7 +587,9 @@ impl PacketTranslator {
         }
 
         // 3. USE_ITEM (< 1.21 sequence / yaw / pitch missing)
-        if new_id == mappings::serverbound::play::USE_ITEM.v26_3 && version < JavaMinecraftVersion::V_1_21 {
+        if new_id == mappings::serverbound::play::USE_ITEM.v26_3
+            && version < JavaMinecraftVersion::V_1_21
+        {
             let hand = payload.get_var_int().ok()?;
             let sequence = if version >= JavaMinecraftVersion::V_1_19 {
                 payload.get_var_int().unwrap_or(VarInt(0))
@@ -599,7 +605,9 @@ impl PacketTranslator {
         }
 
         // 4. SIGN_UPDATE (< 26.3 is_front_text was bool before lines or missing in < 1.20)
-        if new_id == mappings::serverbound::play::SIGN_UPDATE.v26_3 && version < JavaMinecraftVersion::V_26_3 {
+        if new_id == mappings::serverbound::play::SIGN_UPDATE.v26_3
+            && version < JavaMinecraftVersion::V_26_3
+        {
             let pos_val = payload.get_i64_be().ok()?;
             let is_front = if version >= JavaMinecraftVersion::V_1_20 {
                 payload.get_bool().unwrap_or(true)
@@ -621,7 +629,9 @@ impl PacketTranslator {
         }
 
         // 5. PLAYER_ACTION (< 26.3 status shifted by 1, < 1.19 sequence missing)
-        if new_id == mappings::serverbound::play::PLAYER_ACTION.v26_3 && version < JavaMinecraftVersion::V_26_3 {
+        if new_id == mappings::serverbound::play::PLAYER_ACTION.v26_3
+            && version < JavaMinecraftVersion::V_26_3
+        {
             let status = if version >= JavaMinecraftVersion::V_1_9 {
                 payload.get_var_int().ok()?
             } else {
@@ -648,7 +658,9 @@ impl PacketTranslator {
         }
 
         // 6. PLAYER_COMMAND (< 1.21.6 action 0/1 were sneak)
-        if new_id == mappings::serverbound::play::PLAYER_COMMAND.v26_3 && version < JavaMinecraftVersion::V_1_21_6 {
+        if new_id == mappings::serverbound::play::PLAYER_COMMAND.v26_3
+            && version < JavaMinecraftVersion::V_1_21_6
+        {
             let entity_id = if version >= JavaMinecraftVersion::V_1_8 {
                 payload.get_var_int().ok()?
             } else {
@@ -692,7 +704,9 @@ impl PacketTranslator {
         }
 
         // 8. HELLO / LOGIN_START (< 1.20.2 missing UUID)
-        if new_id == mappings::serverbound::login::HELLO.v26_3 && version < JavaMinecraftVersion::V_1_20_2 {
+        if new_id == mappings::serverbound::login::HELLO.v26_3
+            && version < JavaMinecraftVersion::V_1_20_2
+        {
             let name = payload.get_str_borrowed().ok()?;
             let offline_uuid = uuid::Uuid::new_v3(
                 &uuid::Uuid::nil(),
@@ -705,7 +719,9 @@ impl PacketTranslator {
         }
 
         // 9. CHANGE_DIFFICULTY (< 1.21.6 was u8, now VarInt)
-        if new_id == mappings::serverbound::play::CHANGE_DIFFICULTY.v26_3 && version < JavaMinecraftVersion::V_1_21_6 {
+        if new_id == mappings::serverbound::play::CHANGE_DIFFICULTY.v26_3
+            && version < JavaMinecraftVersion::V_1_21_6
+        {
             let diff = payload.get_u8().ok()?;
             let mut out = Vec::new();
             let _ = out.write_var_int(&VarInt(i32::from(diff)));
@@ -713,23 +729,39 @@ impl PacketTranslator {
         }
 
         // 10. PLAYER_INPUT (< 1.21.2 was floats + bools, now i8 bitmask)
-        if new_id == mappings::serverbound::play::PLAYER_INPUT.v26_3 && version < JavaMinecraftVersion::V_1_21_2 {
+        if new_id == mappings::serverbound::play::PLAYER_INPUT.v26_3
+            && version < JavaMinecraftVersion::V_1_21_2
+        {
             let sideways = payload.get_f32_be().unwrap_or(0.0);
             let forward = payload.get_f32_be().unwrap_or(0.0);
             let jumping = payload.get_bool().unwrap_or(false);
             let sneaking = payload.get_bool().unwrap_or(false);
             let mut input: i8 = 0;
-            if forward > 0.0 { input |= 1; } else if forward < 0.0 { input |= 2; }
-            if sideways > 0.0 { input |= 4; } else if sideways < 0.0 { input |= 8; }
-            if jumping { input |= 16; }
-            if sneaking { input |= 32; }
+            if forward > 0.0 {
+                input |= 1;
+            } else if forward < 0.0 {
+                input |= 2;
+            }
+            if sideways > 0.0 {
+                input |= 4;
+            } else if sideways < 0.0 {
+                input |= 8;
+            }
+            if jumping {
+                input |= 16;
+            }
+            if sneaking {
+                input |= 32;
+            }
             let mut out = Vec::new();
             let _ = out.write_i8(input);
             return Some(out);
         }
 
         // 11. MOVE_VEHICLE (< 1.21.4 missing on_ground bool)
-        if new_id == mappings::serverbound::play::MOVE_VEHICLE.v26_3 && version < JavaMinecraftVersion::V_1_21_4 {
+        if new_id == mappings::serverbound::play::MOVE_VEHICLE.v26_3
+            && version < JavaMinecraftVersion::V_1_21_4
+        {
             let x = payload.get_f64_be().ok()?;
             let y = payload.get_f64_be().ok()?;
             let z = payload.get_f64_be().ok()?;
@@ -746,7 +778,9 @@ impl PacketTranslator {
         }
 
         // 12. CONTAINER_BUTTON_CLICK (< 1.21.2 button was i8)
-        if new_id == mappings::serverbound::play::CONTAINER_BUTTON_CLICK.v26_3 && version < JavaMinecraftVersion::V_1_21_2 {
+        if new_id == mappings::serverbound::play::CONTAINER_BUTTON_CLICK.v26_3
+            && version < JavaMinecraftVersion::V_1_21_2
+        {
             let window_id = payload.get_u8().ok()?;
             let button_id = payload.get_i8().ok()?;
             let mut out = Vec::new();
@@ -774,86 +808,94 @@ impl PacketTranslator {
         }
 
         // Check for CSpawnEntity (ADD_ENTITY) in 26.3
-        if packet_id == mappings::clientbound::play::ADD_ENTITY.v26_3 {
-            if let Ok(spawn_entity) = CSpawnEntity::read_packet_data(raw_payload, &JavaMinecraftVersion::V_26_3) {
-                let entity_type_id = spawn_entity.r#type.0 as u16;
+        if packet_id == mappings::clientbound::play::ADD_ENTITY.v26_3
+            && let Ok(spawn_entity) =
+                CSpawnEntity::read_packet_data(raw_payload, &JavaMinecraftVersion::V_26_3)
+        {
+            let entity_type_id = spawn_entity.r#type.0 as u16;
 
-                // 1. Check if entity is a Painting in <= 1.18.2
-                if version <= JavaMinecraftVersion::V_1_18_2 && entity_type_id == EntityType::PAINTING.id {
-                    let painting = CSpawnPainting::new(
+            // 1. Check if entity is a Painting in <= 1.18.2
+            if version <= JavaMinecraftVersion::V_1_18_2
+                && entity_type_id == EntityType::PAINTING.id
+            {
+                let painting = CSpawnPainting::new(
+                    spawn_entity.entity_id,
+                    spawn_entity.entity_uuid,
+                    String::new(),
+                    spawn_entity.data,
+                    BlockPos::new(
+                        spawn_entity.position.x.floor() as i32,
+                        spawn_entity.position.y.floor() as i32,
+                        spawn_entity.position.z.floor() as i32,
+                    ),
+                    spawn_entity.yaw,
+                );
+                let mut buf = Vec::new();
+                if painting.write_packet_data(&mut buf, &version).is_ok() {
+                    let target_id = CSpawnPainting::to_id(version);
+                    return Some((target_id, buf));
+                }
+            }
+
+            // 2. Check if entity is a living mob in < 1.19
+            if version < JavaMinecraftVersion::V_1_19 {
+                let is_mob = EntityType::from_raw(entity_type_id).is_some_and(|e| e.mob);
+                if is_mob {
+                    let living = CSpawnLivingEntity::new(
                         spawn_entity.entity_id,
                         spawn_entity.entity_uuid,
-                        String::new(),
-                        spawn_entity.data,
-                        BlockPos::new(
-                            spawn_entity.position.x.floor() as i32,
-                            spawn_entity.position.y.floor() as i32,
-                            spawn_entity.position.z.floor() as i32,
-                        ),
-                        spawn_entity.yaw,
+                        spawn_entity.r#type,
+                        spawn_entity.position,
+                        spawn_entity.pitch_degrees(),
+                        spawn_entity.yaw_degrees(),
+                        spawn_entity.head_yaw_degrees(),
+                        spawn_entity.velocity.0,
+                        None,
                     );
                     let mut buf = Vec::new();
-                    if painting.write_packet_data(&mut buf, &version).is_ok() {
-                        let target_id = CSpawnPainting::to_id(version);
+                    if living.write_packet_data(&mut buf, &version).is_ok() {
+                        let target_id = CSpawnLivingEntity::to_id(version);
                         return Some((target_id, buf));
                     }
                 }
+            }
 
-                // 2. Check if entity is a living mob in < 1.19
-                if version < JavaMinecraftVersion::V_1_19 {
-                    let is_mob = EntityType::from_raw(entity_type_id).map_or(false, |e| e.mob);
-                    if is_mob {
-                        let living = CSpawnLivingEntity::new(
-                            spawn_entity.entity_id,
-                            spawn_entity.entity_uuid,
-                            spawn_entity.r#type,
-                            spawn_entity.position,
-                            spawn_entity.pitch_degrees(),
-                            spawn_entity.yaw_degrees(),
-                            spawn_entity.head_yaw_degrees(),
-                            spawn_entity.velocity.0,
-                            None,
-                        );
-                        let mut buf = Vec::new();
-                        if living.write_packet_data(&mut buf, &version).is_ok() {
-                            let target_id = CSpawnLivingEntity::to_id(version);
-                            return Some((target_id, buf));
-                        }
-                    }
-                }
+            // 3. Normal entity: remap object/entity type and falling block state
+            let remapped_type = if version < JavaMinecraftVersion::V_1_14 {
+                VarInt(i32::from(remap_object_type_for_version(
+                    entity_type_id,
+                    version,
+                )))
+            } else {
+                VarInt(i32::from(
+                    remap::entity_id_remap::remap_entity_id_for_version(entity_type_id, version),
+                ))
+            };
 
-                // 3. Normal entity: remap object/entity type and falling block state
-                let remapped_type = if version < JavaMinecraftVersion::V_1_14 {
-                    VarInt(i32::from(remap_object_type_for_version(entity_type_id, version)))
-                } else {
-                    VarInt(i32::from(remap::entity_id_remap::remap_entity_id_for_version(entity_type_id, version)))
-                };
+            let remapped_data = if entity_type_id == EntityType::FALLING_BLOCK.id {
+                u16::try_from(spawn_entity.data.0).map_or(spawn_entity.data, |state_id| {
+                    VarInt(i32::from(remap_block_state_for_version(state_id, version)))
+                })
+            } else {
+                spawn_entity.data
+            };
 
-                let remapped_data = if entity_type_id == EntityType::FALLING_BLOCK.id {
-                    u16::try_from(spawn_entity.data.0).map_or(spawn_entity.data, |state_id| {
-                        VarInt(i32::from(remap_block_state_for_version(state_id, version)))
-                    })
-                } else {
-                    spawn_entity.data
-                };
+            let modified_spawn = CSpawnEntity {
+                entity_id: spawn_entity.entity_id,
+                entity_uuid: spawn_entity.entity_uuid,
+                r#type: remapped_type,
+                position: spawn_entity.position,
+                velocity: spawn_entity.velocity,
+                pitch: spawn_entity.pitch,
+                yaw: spawn_entity.yaw,
+                head_yaw: spawn_entity.head_yaw,
+                data: remapped_data,
+            };
 
-                let modified_spawn = CSpawnEntity {
-                    entity_id: spawn_entity.entity_id,
-                    entity_uuid: spawn_entity.entity_uuid,
-                    r#type: remapped_type,
-                    position: spawn_entity.position,
-                    velocity: spawn_entity.velocity,
-                    pitch: spawn_entity.pitch,
-                    yaw: spawn_entity.yaw,
-                    head_yaw: spawn_entity.head_yaw,
-                    data: remapped_data,
-                };
-
-                let mut buf = Vec::new();
-                if modified_spawn.write_packet_data(&mut buf, &version).is_ok() {
-                    let target_id = mappings::clientbound::play::ADD_ENTITY.to_id(version);
-                    return Some((target_id, buf));
-                }
+            let mut buf = Vec::new();
+            if modified_spawn.write_packet_data(&mut buf, &version).is_ok() {
+                let target_id = mappings::clientbound::play::ADD_ENTITY.to_id(version);
+                return Some((target_id, buf));
             }
         }
 

@@ -5,12 +5,13 @@ pub mod remap;
 pub mod tag;
 
 use pumpkin_plugin_api::{
+    Context, Plugin, PluginMetadata, Server,
     events::{
         EventHandler, EventPriority,
         packet::{PacketReceivedEvent, PacketSentEvent},
     },
     events_wit::{PacketReceivedEventData, PacketSentEventData},
-    Context, Plugin, PluginMetadata, Server, register_plugin,
+    register_plugin,
 };
 
 use crate::packet::translator::{PacketTranslator, from_wasm_java_version};
@@ -29,7 +30,8 @@ impl Plugin for MultiVersionPlugin {
             name: "pumpkin-java-multiversion".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             authors: vec!["Pumpkin Developer".into()],
-            description: "Multi-version Java Edition protocol translation plugin for Pumpkin.".into(),
+            description: "Multi-version Java Edition protocol translation plugin for Pumpkin."
+                .into(),
             dependencies: vec![],
             permissions: vec![],
         }
@@ -39,17 +41,9 @@ impl Plugin for MultiVersionPlugin {
         tracing::info!("Loading Pumpkin Java Multi-Version Plugin...");
 
         // Register packet event handlers with High priority to translate before/after game logic
-        context.register_event_handler(
-            PacketReceivedHandler,
-            EventPriority::Highest,
-            true,
-        )?;
+        context.register_event_handler(PacketReceivedHandler, EventPriority::Highest, true)?;
 
-        context.register_event_handler(
-            PacketSentHandler,
-            EventPriority::Lowest,
-            true,
-        )?;
+        context.register_event_handler(PacketSentHandler, EventPriority::Lowest, true)?;
 
         tracing::info!("Pumpkin Java Multi-Version Plugin enabled! Supporting 1.7.2 - 26.3");
         Ok(())
@@ -65,7 +59,11 @@ impl Plugin for MultiVersionPlugin {
 struct PacketReceivedHandler;
 
 impl EventHandler<PacketReceivedEvent> for PacketReceivedHandler {
-    fn handle(&self, _server: Server, mut event: PacketReceivedEventData) -> PacketReceivedEventData {
+    fn handle(
+        &self,
+        _server: Server,
+        mut event: PacketReceivedEventData,
+    ) -> PacketReceivedEventData {
         if let Some(java_player) = event.player.as_java() {
             let version = from_wasm_java_version(java_player.get_version());
             if let Some((new_id, new_payload)) = PacketTranslator::translate_incoming_packet(
