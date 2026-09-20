@@ -218,6 +218,30 @@ pub fn rewrite_respawn(payload: &[u8], version: JavaMinecraftVersion) -> Option<
 /// kept-data flag (1 each).
 const RESPAWN_TAIL_LEN: usize = 8 + 5;
 
+/// The dimension bounds a `LOGIN` payload names, for the versions whose join
+/// packet carries the dimension inline or by name.
+#[must_use]
+pub fn login_dimension_bounds(payload: &[u8], version: JavaMinecraftVersion) -> Option<(i32, i32)> {
+    if version < OLDEST_LAYOUT || version >= FIRST_WITH_CONFIG_STATE {
+        return None;
+    }
+    let mut read: &[u8] = payload;
+    read.get_i32_be().ok()?;
+    read.get_bool().ok()?;
+    read.get_u8().ok()?;
+    read.get_i8().ok()?;
+    let world_count = usize::try_from(read.get_var_int().ok()?.0).ok()?;
+    for _ in 0..world_count {
+        read.get_str().ok()?;
+    }
+    take_named_nbt(&mut read)?;
+    if version < FIRST_WITH_DIMENSION_NAME {
+        take_named_nbt(&mut read)?;
+    }
+    let name = read.get_str().ok()?;
+    crate::registry::dimension_bounds(version, &name)
+}
+
 /// Reads the 1.19+ optional last death position: a flag, then a dimension name
 /// and a packed `BlockPos` long.
 #[allow(clippy::option_option)]

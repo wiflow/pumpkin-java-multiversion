@@ -1,7 +1,10 @@
+pub mod api;
 #[cfg(not(target_family = "wasm"))]
 pub mod chunk;
 pub mod data;
 pub mod packet;
+pub mod pipeline;
+pub mod protocol;
 pub mod registry;
 pub mod remap;
 pub mod tag;
@@ -11,12 +14,13 @@ use pumpkin_plugin_api::{
     events::{
         EventHandler, EventPriority,
         packet::{PacketReceivedEvent, PacketSentEvent},
+        player::player_leave::PlayerLeaveEvent,
     },
-    events_wit::{PacketReceivedEventData, PacketSentEventData},
+    events_wit::{PacketReceivedEventData, PacketSentEventData, PlayerLeaveEventData},
     register_plugin,
 };
 
-use crate::packet::translator::PacketTranslator;
+use crate::api::{connection_key, remove_connection};
 use crate::packet::{HIGHEST_SUPPORTED, LOWEST_SUPPORTED, is_version_supported};
 use pumpkin_protocol::ser::NetworkWriteExt;
 use pumpkin_util::version::JavaMinecraftVersion;
@@ -49,6 +53,8 @@ impl Plugin for MultiVersionPlugin {
         context.register_event_handler(PacketReceivedHandler, EventPriority::Highest, true)?;
 
         context.register_event_handler(PacketSentHandler, EventPriority::Lowest, true)?;
+
+        context.register_event_handler(PlayerLeaveHandler, EventPriority::Lowest, true)?;
 
         tracing::info!(
             "Pumpkin Java Multi-Version Plugin enabled! Supporting {LOWEST_SUPPORTED} - {HIGHEST_SUPPORTED}"
@@ -87,15 +93,17 @@ impl EventHandler<PacketReceivedEvent> for PacketReceivedHandler {
         if event.connection_state < 2 {
             return event;
         }
-        match PacketTranslator::translate_incoming_packet(
-            event.packet_id,
-            &event.raw_payload,
+        match pipeline::translate_serverbound(
+            connection_key(event.player.as_ref()),
             version,
             event.connection_state,
+            event.packet_id,
+            &event.raw_payload,
         ) {
-            Some((new_id, new_payload)) => {
-                event.packet_id = new_id;
-                event.raw_payload = new_payload;
+            Some(translated) => {
+                event.packet_id = translated.packet.v26_3;
+                event.raw_payload = translated.payload;
+                drop_extra(&translated.extra);
             }
             // No 26.3 equivalent. Forwarding it unchanged makes the server
             // read the id as whatever packet now occupies that slot and
@@ -120,20 +128,47 @@ impl EventHandler<PacketSentEvent> for PacketSentHandler {
         if !is_version_supported(version) {
             return refuse_unsupported(event, version);
         }
-        match PacketTranslator::translate_outgoing_packet(
-            event.packet_id,
-            &event.raw_payload,
+        // Handshake has no clientbound packets and therefore no table.
+        if event.connection_state == 0 {
+            return event;
+        }
+        match pipeline::translate_clientbound(
+            connection_key(event.player.as_ref()),
             version,
             event.connection_state,
+            event.packet_id,
+            &event.raw_payload,
         ) {
-            Some((new_id, new_payload)) => {
-                event.packet_id = new_id;
-                event.raw_payload = new_payload;
+            Some(translated) => {
+                event.packet_id = translated.packet.to_id(version);
+                event.raw_payload = translated.payload;
+                drop_extra(&translated.extra);
             }
             // No id for this version: the packet does not exist on the client.
             // Sending it under a 26.3 id would desync the stream, so drop it.
             None => event.cancelled = true,
         }
+        event
+    }
+}
+
+/// Drops the queued follow-up packets until `PacketSentEvent` carries
+/// `extra-packets` (see `crates/pumpkin-plugin-wit/v0.1/event.wit`).
+fn drop_extra(extra: &[(&'static packet::mappings::PacketId, Vec<u8>)]) {
+    if !extra.is_empty() {
+        tracing::debug!(
+            "dropping {} extra packet(s): the hook cannot send them",
+            extra.len()
+        );
+    }
+}
+
+/// Forgets the per connection state a leaving player owned.
+struct PlayerLeaveHandler;
+
+impl EventHandler<PlayerLeaveEvent> for PlayerLeaveHandler {
+    fn handle(&self, _server: Server, event: PlayerLeaveEventData) -> PlayerLeaveEventData {
+        remove_connection(connection_key(Some(&event.player)));
         event
     }
 }

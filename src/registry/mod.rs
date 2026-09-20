@@ -191,6 +191,17 @@ pub fn dimension_type_element(version: JavaMinecraftVersion, name: &str) -> Opti
         .map(|entry| entry.data)
 }
 
+/// The current dimension's `min_y` and `height`. 1.16.x carries neither and
+/// is fixed at 0 to 255.
+#[must_use]
+pub fn dimension_bounds(version: JavaMinecraftVersion, name: &str) -> Option<(i32, i32)> {
+    let element = read_unnamed_compound(dimension_type_element(version, name)?)?;
+    Some((
+        element.get_int("min_y").unwrap_or(0),
+        element.get_int("height").unwrap_or(256),
+    ))
+}
+
 /// Rewrites the registry codec compound in place: registries `version` does
 /// not have are left out, and every kept entry keeps the server's name and id
 /// but carries this version's own element NBT.

@@ -8,7 +8,6 @@ pub mod legacy;
 pub mod mappings;
 pub mod score;
 pub mod status;
-pub mod translator;
 pub mod update_tags;
 
 /// Oldest client version this plugin admits.
