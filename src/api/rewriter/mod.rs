@@ -5,6 +5,7 @@ pub mod entity;
 pub mod item;
 pub mod item_component;
 pub mod item_nbt;
+pub mod item_shape;
 pub mod particle;
 pub mod screen;
 pub mod sound;

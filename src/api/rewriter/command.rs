@@ -15,16 +15,6 @@ const NODE_TYPE: u8 = 3;
 const HAS_REDIRECT: u8 = 8;
 const HAS_SUGGESTION_TYPE: u8 = 16;
 
-/// Core numbers its `ArgumentType` like 26.2, where dialog is 55 and uuid 56;
-/// the 26.3 registry has them at 58 and 61.
-const fn native(parser: i32) -> i32 {
-    match parser {
-        55 => 58,
-        56 => 61,
-        id => id,
-    }
-}
-
 /// Copies a parser's properties, or reads past them when the client is getting
 /// a plain string instead.
 fn properties(
@@ -108,7 +98,7 @@ pub fn commands(
             wrapper.passthrough(&STRING)?;
         }
         if node_type == 2 {
-            let parser = native(wrapper.read(&VAR_INT)?.0);
+            let parser = wrapper.read(&VAR_INT)?.0;
             let mapped = u32::try_from(parser)
                 .ok()
                 .and_then(|id| ids.argumenttypes.map(id))
@@ -204,14 +194,17 @@ mod tests {
         assert_eq!(out, payload(string, &[0]));
     }
 
-    /// Core writes dialog as 55 and uuid as 56, the 26.2 numbering.
+    /// Dialog is 58 and uuid 61 on 26.3; both are taken as core writes them.
     #[test]
-    fn the_core_numbering_of_dialog_and_uuid_is_corrected() {
+    fn dialog_and_uuid_map_from_their_26_3_ids() {
         let version = JavaMinecraftVersion::V_1_21_6;
         let ids = MappingData::get().composed(version);
-        for (parser, expected) in [(55, 58), (56, 61)] {
-            let mapped = i32::try_from(ids.argumenttypes.map(expected).unwrap()).unwrap();
-            assert_eq!(run(&payload(parser, &[]), version), payload(mapped, &[]));
+        for parser in [58, 61] {
+            let mapped = i32::try_from(ids.argumenttypes.map(parser).unwrap()).unwrap();
+            assert_eq!(
+                run(&payload(parser as i32, &[]), version),
+                payload(mapped, &[])
+            );
         }
     }
 }

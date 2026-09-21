@@ -1,7 +1,5 @@
-use pumpkin_data::data_component::DataComponent;
 use pumpkin_nbt::tag::NbtTag;
 use pumpkin_protocol::codec::bit_set::BitSet;
-use pumpkin_protocol::codec::data_component;
 use pumpkin_protocol::codec::var_int::VarInt;
 use pumpkin_protocol::codec::var_long::VarLong;
 use pumpkin_protocol::ser::{
@@ -361,16 +359,9 @@ impl Item {
 
 const MAX_COMPONENTS: i32 = 256;
 
-/// How many bytes component `id` takes in the 26.3 encoding. Core's own
-/// component reader is the measure; one it cannot read ends the stack.
+/// How many bytes component `id` takes in the 26.3 encoding.
 pub fn component_payload_len(id: i32, bytes: &[u8]) -> Result<usize, ReadingError> {
-    let component = u8::try_from(id)
-        .ok()
-        .and_then(DataComponent::try_from_id)
-        .ok_or_else(|| ReadingError::Message(format!("unknown component {id}")))?;
-    let mut cursor = bytes;
-    data_component::deserialize(component, &mut cursor)?;
-    Ok(bytes.len() - cursor.len())
+    crate::api::rewriter::item_shape::payload_len(id, bytes)
 }
 
 /// The structured form from 1.20.5, the NBT form below it.
