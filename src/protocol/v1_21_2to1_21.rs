@@ -1,12 +1,15 @@
-use pumpkin_data::item::Item;
-use pumpkin_protocol::codec::var_int::VarInt;
-use pumpkin_util::version::JavaMinecraftVersion;
-
-use crate::api::types::{STRING, VAR_INT};
+use crate::api::types::{I8, I16, STRING, VAR_INT};
 use crate::api::{
     Ctx, MappingData, PacketWrapper, Protocol, Registry, Step, TranslateError, UserConnection,
 };
 use crate::packet::mappings::clientbound;
+use pumpkin_data::item::Item;
+use pumpkin_protocol::codec::var_int::VarInt;
+use pumpkin_util::version::JavaMinecraftVersion;
+
+/// The window and slot a container set slot addresses the cursor with.
+const CURSOR_CONTAINER: i8 = -1;
+const CURSOR_SLOT: i16 = -1;
 
 pub struct Protocol1_21_2To1_21;
 
@@ -20,6 +23,7 @@ impl Protocol for Protocol1_21_2To1_21 {
 
     fn register(&self, reg: &mut Registry) {
         reg.clientbound_layout(&clientbound::play::COOLDOWN, cooldown);
+        reg.clientbound(&clientbound::play::SET_CURSOR_ITEM, cursor_item);
     }
 }
 
@@ -41,6 +45,22 @@ fn cooldown(
     };
     wrapper.write(&VAR_INT, &VarInt(id))?;
     wrapper.passthrough(&VAR_INT)?;
+    Ok(())
+}
+
+/// 1.21 has no packet for the cursor and takes it as a slot of no container.
+fn cursor_item(
+    wrapper: &mut PacketWrapper,
+    _connection: &mut UserConnection,
+    ctx: &Ctx,
+) -> Result<(), TranslateError> {
+    wrapper.write(&I8, &CURSOR_CONTAINER)?;
+    if ctx.layout >= JavaMinecraftVersion::V_1_17_1 {
+        wrapper.write(&VAR_INT, &VarInt(0))?;
+    }
+    wrapper.write(&I16, &CURSOR_SLOT)?;
+    wrapper.passthrough_all();
+    wrapper.set_packet(&clientbound::play::CONTAINER_SET_SLOT);
     Ok(())
 }
 
@@ -118,5 +138,49 @@ mod tests {
             )
             .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod player_tests {
+    use super::*;
+    use crate::api::remove_connection;
+    use crate::pipeline::translate_clientbound;
+    use pumpkin_data::item_stack::ItemStack;
+    use pumpkin_protocol::ClientPacket;
+    use pumpkin_protocol::codec::item_stack_seralizer::ItemStackSerializer;
+    use pumpkin_protocol::java::client::play::CSetCursorItem;
+    const PLAY: u8 = 5;
+
+    /// minecraft-data 1.21.1 `packet_set_slot`: a window id, a state id, the
+    /// slot and the stack; 1.16.2 has the same without the state id.
+    #[test]
+    fn the_cursor_becomes_a_slot_of_no_container() {
+        for (version, head) in [
+            (JavaMinecraftVersion::V_1_21, vec![0xffu8, 0x00, 0xff, 0xff]),
+            (JavaMinecraftVersion::V_1_16_2, vec![0xff, 0xff, 0xff]),
+        ] {
+            let stack = ItemStackSerializer::from(Option::<ItemStack>::None);
+            let mut payload = Vec::new();
+            CSetCursorItem::new(&stack)
+                .write_packet_data(&mut payload, &version)
+                .unwrap();
+
+            let out = translate_clientbound(
+                60,
+                version,
+                PLAY,
+                clientbound::play::SET_CURSOR_ITEM.v26_3,
+                &payload,
+            )
+            .unwrap();
+            assert_eq!(
+                out.packet.to_id(version),
+                clientbound::play::CONTAINER_SET_SLOT.to_id(version),
+                "{version}"
+            );
+            assert_eq!(&out.payload[..head.len()], &head[..], "{version}");
+            remove_connection(60);
+        }
     }
 }

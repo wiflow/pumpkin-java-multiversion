@@ -153,6 +153,48 @@ fn table() -> &'static HashMap<usize, JavaMinecraftVersion> {
         put(&clientbound::play::UPDATE_ADVANCEMENTS, V::V_1_7_2);
         // net/java/play/tag_query.rs: the root is always written unnamed, which is the 1.20.2 form.
         put(&clientbound::play::TAG_QUERY, V::V_1_20_2);
+        // java/client/play/player_info_update.rs: masks the list priority below 1.21.2 and the hat below 1.21.4.
+        put(&clientbound::play::PLAYER_INFO_UPDATE, V::V_1_19_3);
+        // java/client/play/player_remove.rs: no branch; the packet starts at 1.19.3.
+        put(&clientbound::play::PLAYER_INFO_REMOVE, V::V_1_19_3);
+        // java/client/play/player_chat_message.rs: no branch beyond the component form, and the global index it always writes starts at 1.21.5.
+        put(&clientbound::play::PLAYER_CHAT, V::V_1_21_5);
+        // java/client/play/system_chat_message.rs: branches at 1.19.1, 1.19, 1.16 and 1.8.
+        put(&clientbound::play::SYSTEM_CHAT, V::V_1_7_2);
+        // java/client/play/disguised_chat_message.rs: no branch; the chat type goes out in the holder form 1.21 reads.
+        put(&clientbound::play::DISGUISED_CHAT, V::V_1_21);
+        // java/client/play/delete_chat.rs: no branch; the packed signature id starts at 1.19.3.
+        put(&clientbound::play::DELETE_CHAT, V::V_1_19_3);
+        // java/client/play/server_data.rs: branches at 1.19.4, 1.19.3, 1.19.1 and 1.20.5.
+        put(&clientbound::play::SERVER_DATA, V::V_1_19);
+        // java/client/play/combat_event.rs: no branch; the opponent id 1.17 to 1.19.4 carry is gone from 1.20.
+        put(&clientbound::play::PLAYER_COMBAT_END, V::V_1_20);
+        // java/client/play/combat_death.rs: no branch beyond the component form; the killer id likewise stops at 1.19.4.
+        put(&clientbound::play::PLAYER_COMBAT_KILL, V::V_1_20);
+        // java/client/play/combat_event.rs: an empty payload on every version that has the packet.
+        put(&clientbound::play::PLAYER_COMBAT_ENTER, V::V_1_17);
+        // java/client/play/initialize_world_border.rs: no branch; the varlong lerp time is the varint form for every value core sends.
+        put(&clientbound::play::INITIALIZE_BORDER, V::V_1_17);
+        // java/client/play/set_border_lerp_size.rs: the same varlong.
+        put(&clientbound::play::SET_BORDER_LERP_SIZE, V::V_1_17);
+        // java/client/play/set_border_size.rs: no branch; the packet starts at 1.17.
+        put(&clientbound::play::SET_BORDER_SIZE, V::V_1_17);
+        // java/client/play/set_border_center.rs: likewise.
+        put(&clientbound::play::SET_BORDER_CENTER, V::V_1_17);
+        // java/client/play/set_border_warning_delay.rs: likewise.
+        put(&clientbound::play::SET_BORDER_WARNING_DELAY, V::V_1_17);
+        // java/client/play/set_border_warning_distance.rs: likewise.
+        put(&clientbound::play::SET_BORDER_WARNING_DISTANCE, V::V_1_17);
+        // java/client/play/set_title.rs: no branch beyond the component form; the packet starts at 1.17.
+        put(&clientbound::play::SET_TITLE_TEXT, V::V_1_17);
+        // java/client/play/subtitle.rs: likewise.
+        put(&clientbound::play::SET_SUBTITLE_TEXT, V::V_1_17);
+        // java/client/play/actionbar.rs: likewise.
+        put(&clientbound::play::SET_ACTION_BAR_TEXT, V::V_1_17);
+        // java/client/play/set_title_animation.rs: three ints, no branch.
+        put(&clientbound::play::SET_TITLES_ANIMATION, V::V_1_17);
+        // java/client/play/clear_title.rs: one bool, no branch.
+        put(&clientbound::play::CLEAR_TITLES, V::V_1_17);
 
         table
     })
@@ -161,6 +203,48 @@ fn table() -> &'static HashMap<usize, JavaMinecraftVersion> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::remove_connection;
+    use crate::pipeline::translate_clientbound;
+    use pumpkin_protocol::ClientPacket;
+    use pumpkin_protocol::java::client::play::CServerData;
+    use pumpkin_util::text::TextComponent;
+
+    /// minecraft-data `packet_server_data` is an optional motd, an optional
+    /// icon and the chat preview flag on 1.19; 1.19.1 adds the secure chat
+    /// flag, 1.19.3 drops the preview one and 1.20.5 the secure one. Core
+    /// writes every one of them, so the packet passes through.
+    #[test]
+    fn server_data_reaches_every_version_as_core_wrote_it() {
+        let motd = TextComponent::text("m");
+        for (version, trailing) in [
+            (JavaMinecraftVersion::V_1_19, 1usize),
+            (JavaMinecraftVersion::V_1_19_1, 2),
+            (JavaMinecraftVersion::V_1_19_3, 1),
+            (JavaMinecraftVersion::V_1_19_4, 0),
+            (JavaMinecraftVersion::V_1_20_5, 0),
+        ] {
+            let mut payload = Vec::new();
+            CServerData::new(&motd, None)
+                .write_packet_data(&mut payload, &version)
+                .unwrap();
+            let out = translate_clientbound(
+                95,
+                version,
+                5,
+                clientbound::play::SERVER_DATA.v26_3,
+                &payload,
+            )
+            .unwrap();
+            assert_eq!(out.payload, payload, "{version}");
+            // The icon flag and whatever flags follow it are all false.
+            assert_eq!(
+                &payload[payload.len() - trailing - 1..],
+                &vec![0u8; trailing + 1][..],
+                "{version}"
+            );
+            remove_connection(95);
+        }
+    }
 
     use crate::pipeline::translate_serverbound;
     use pumpkin_protocol::ServerPacket;

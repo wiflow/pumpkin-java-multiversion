@@ -1,15 +1,17 @@
-use pumpkin_data::entity::EntityType;
-use pumpkin_protocol::VarInt;
-use pumpkin_util::math::position::BlockPos;
-use pumpkin_util::version::JavaMinecraftVersion;
-
+use crate::api::rewriter::chat;
 use crate::api::rewriter::entity::{read_spawn, replace, spawned_type};
-use crate::api::types::{BOOL, F32T, I32T, ItemT, U8, VAR_INT};
+use crate::api::types::{
+    BOOL, BYTE_ARRAY, F32T, I8, I32T, I64T, ItemT, OptionalT, STRING, U8, UUID, VAR_INT,
+};
 use crate::api::{Ctx, PacketWrapper, Protocol, Registry, Step, TranslateError, UserConnection};
 use crate::packet::legacy::{
     CSpawnLivingEntity, CSpawnPainting, DEFAULT_VARIANT, direction_2d_from_3d_index,
 };
 use crate::packet::mappings::clientbound;
+use pumpkin_data::entity::EntityType;
+use pumpkin_protocol::VarInt;
+use pumpkin_util::math::position::BlockPos;
+use pumpkin_util::version::JavaMinecraftVersion;
 
 pub struct Protocol1_19To1_18_2;
 
@@ -24,6 +26,8 @@ impl Protocol for Protocol1_19To1_18_2 {
     fn register(&self, reg: &mut Registry) {
         reg.clientbound(&clientbound::play::ADD_ENTITY, add_entity);
         reg.clientbound(&clientbound::play::MERCHANT_OFFERS, merchant_offers);
+        reg.clientbound(&clientbound::play::SYSTEM_CHAT, system_chat);
+        reg.clientbound_layout(&clientbound::play::PLAYER_INFO, player_info);
     }
 }
 
@@ -124,6 +128,73 @@ fn add_entity(
     }
 
     wrapper.passthrough_all();
+    Ok(())
+}
+
+/// 1.18.2 has one chat packet. Core writes its body itself for a client it
+/// knows, so only a payload that came down the chain still needs converting.
+fn system_chat(
+    wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
+    ctx: &Ctx,
+) -> Result<(), TranslateError> {
+    if ctx.layout >= JavaMinecraftVersion::V_1_19 {
+        wrapper.passthrough(&chat::text(connection))?;
+        let destination = wrapper.read(&VAR_INT)?.0;
+        wrapper.write(&I8, &if destination == 2 { 2 } else { 1 })?;
+        wrapper.write(&UUID, &uuid::Uuid::nil())?;
+    } else {
+        wrapper.passthrough_all();
+    }
+    wrapper.set_packet(&clientbound::play::CHAT);
+    Ok(())
+}
+
+/// 1.19 added the public key an added player signs chat with.
+fn player_info(
+    wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
+    _ctx: &Ctx,
+) -> Result<(), TranslateError> {
+    let action = wrapper.passthrough(&VAR_INT)?.0;
+    let count = wrapper.passthrough(&VAR_INT)?.0;
+    if !(0..=1024).contains(&count) {
+        return Err(TranslateError::Unsupported("player info entry count"));
+    }
+    let text = OptionalT(chat::text(connection));
+    for _ in 0..count {
+        wrapper.passthrough(&UUID)?;
+        match action {
+            0 => {
+                wrapper.passthrough(&STRING)?;
+                let properties = wrapper.passthrough(&VAR_INT)?.0;
+                if !(0..=16).contains(&properties) {
+                    return Err(TranslateError::Unsupported("profile property count"));
+                }
+                for _ in 0..properties {
+                    wrapper.passthrough(&STRING)?;
+                    wrapper.passthrough(&STRING)?;
+                    wrapper.passthrough(&OptionalT(STRING))?;
+                }
+                wrapper.passthrough(&VAR_INT)?;
+                wrapper.passthrough(&VAR_INT)?;
+                wrapper.passthrough(&text)?;
+                if wrapper.read(&BOOL)? {
+                    wrapper.read(&I64T)?;
+                    wrapper.read(&BYTE_ARRAY)?;
+                    wrapper.read(&BYTE_ARRAY)?;
+                }
+            }
+            1 | 2 => {
+                wrapper.passthrough(&VAR_INT)?;
+            }
+            3 => {
+                wrapper.passthrough(&text)?;
+            }
+            4 => {}
+            _ => return Err(TranslateError::Unsupported("player info action")),
+        }
+    }
     Ok(())
 }
 
@@ -258,5 +329,178 @@ mod tests {
         assert!(!spawns_as_living(EntityType::OAK_BOAT.id));
         assert!(!spawns_as_living(EntityType::PAINTING.id));
         assert!(!spawns_as_living(EntityType::PLAYER.id));
+    }
+}
+
+#[cfg(test)]
+mod player_tests {
+    use super::spawns_as_living;
+    use crate::api::remove_connection;
+    use crate::packet::mappings::clientbound;
+    use crate::pipeline::translate_clientbound;
+    use pumpkin_data::entity::EntityType;
+    use pumpkin_protocol::ClientPacket;
+    use pumpkin_protocol::codec::var_int::VarInt;
+    use pumpkin_protocol::java::client::play::{
+        CDisguisedChatMessage, CPlayerChatMessage, CPlayerInfoUpdate, CSystemChatMessage,
+        FilterType, InitChat, Player as InfoPlayer, PlayerAction,
+    };
+    use pumpkin_protocol::ser::NetworkReadExt;
+    use pumpkin_util::text::TextComponent;
+    use pumpkin_util::version::JavaMinecraftVersion;
+    const PLAY: u8 = 5;
+    const VERSION: JavaMinecraftVersion = JavaMinecraftVersion::V_1_16_2;
+
+    /// minecraft-data 1.16.2 `packet_chat`: a json message, a position byte
+    /// and the sender uuid.
+    fn read_legacy_chat(payload: &[u8]) -> (String, i8, uuid::Uuid) {
+        let mut cursor = payload;
+        let message = cursor.get_str().unwrap().to_string();
+        let position = cursor.get_i8().unwrap();
+        let sender = cursor.get_uuid().unwrap();
+        assert!(cursor.is_empty());
+        (message, position, sender)
+    }
+
+    /// Core writes the legacy body itself, so the packet only changes id.
+    #[test]
+    fn a_system_message_arrives_as_the_one_chat_packet() {
+        let content = TextComponent::text("hello");
+        let mut payload = Vec::new();
+        CSystemChatMessage::new(&content, false)
+            .write_packet_data(&mut payload, &VERSION)
+            .unwrap();
+
+        let out = translate_clientbound(
+            50,
+            VERSION,
+            PLAY,
+            clientbound::play::SYSTEM_CHAT.v26_3,
+            &payload,
+        )
+        .unwrap();
+        assert_eq!(out.payload, payload);
+        assert_eq!(
+            out.packet.to_id(VERSION),
+            clientbound::play::CHAT.to_id(VERSION)
+        );
+        remove_connection(50);
+    }
+
+    /// A disguised chat has to cross every boundary down to the one packet:
+    /// the holder at 1.21, the decoration at 1.19.3, the destination at 1.19.
+    #[test]
+    fn a_disguised_message_is_decorated_and_folded_into_chat() {
+        let message = TextComponent::text("hello");
+        let sender = TextComponent::text("bob");
+        let mut payload = Vec::new();
+        // The raw chat type, which the server sends as the holder 8.
+        CDisguisedChatMessage::new(&message, VarInt(8), &sender, None)
+            .write_packet_data(&mut payload, &VERSION)
+            .unwrap();
+
+        let out = translate_clientbound(
+            51,
+            VERSION,
+            PLAY,
+            clientbound::play::DISGUISED_CHAT.v26_3,
+            &payload,
+        )
+        .unwrap();
+        assert_eq!(
+            out.packet.to_id(VERSION),
+            clientbound::play::CHAT.to_id(VERSION)
+        );
+        let (json, position, sender_uuid) = read_legacy_chat(&out.payload);
+        assert!(json.contains("hello"), "{json}");
+        assert_eq!(position, 1);
+        assert!(sender_uuid.is_nil());
+        remove_connection(51);
+    }
+
+    /// 1.18.2 knows nothing of the chat key an added player carries from 1.19,
+    /// so the whole way down is 1.19.3 to the legacy action and then the strip.
+    #[test]
+    fn an_added_player_loses_its_chat_key() {
+        let actions = [
+            PlayerAction::AddPlayer {
+                name: "bob",
+                properties: &[],
+            },
+            PlayerAction::InitializeChat(Some(InitChat {
+                session_id: uuid::Uuid::nil(),
+                expires_at: 5,
+                public_key: Box::new([0xaa]),
+                signature: Box::new([0xbb, 0xcc]),
+            })),
+        ];
+        let players = [InfoPlayer {
+            uuid: uuid::Uuid::nil(),
+            actions: &actions,
+        }];
+        let mut payload = Vec::new();
+        CPlayerInfoUpdate::new(0x01 | 0x02, &players)
+            .write_packet_data(&mut payload, &VERSION)
+            .unwrap();
+
+        let out = translate_clientbound(
+            52,
+            VERSION,
+            PLAY,
+            clientbound::play::PLAYER_INFO_UPDATE.v26_3,
+            &payload,
+        )
+        .unwrap();
+        let mut expected = vec![0x00, 0x01];
+        expected.extend_from_slice(&[0u8; 16]);
+        expected.extend_from_slice(b"bob    ");
+        assert_eq!(out.payload, expected);
+        assert_eq!(
+            out.packet.to_id(VERSION),
+            clientbound::play::PLAYER_INFO.to_id(VERSION)
+        );
+        remove_connection(52);
+    }
+
+    /// The whole chain: the global index goes at 1.21.5, the holder at 1.21,
+    /// the signed form at 1.19.3 and the destination at 1.19.
+    #[test]
+    fn a_signed_message_reaches_1_16_2_as_chat() {
+        let mut payload = Vec::new();
+        CPlayerChatMessage::new(
+            VarInt(0),
+            uuid::Uuid::nil(),
+            VarInt(0),
+            None,
+            "hello".into(),
+            0,
+            0,
+            Box::new([]),
+            None,
+            FilterType::PassThrough,
+            VarInt(8),
+            TextComponent::text("bob"),
+            None,
+        )
+        .write_packet_data(&mut payload, &VERSION)
+        .unwrap();
+
+        let out = translate_clientbound(
+            53,
+            VERSION,
+            PLAY,
+            clientbound::play::PLAYER_CHAT.v26_3,
+            &payload,
+        )
+        .unwrap();
+        assert_eq!(
+            out.packet.to_id(VERSION),
+            clientbound::play::CHAT.to_id(VERSION)
+        );
+        let (json, position, sender) = read_legacy_chat(&out.payload);
+        assert!(json.contains("hello"), "{json}");
+        assert_eq!(position, 1);
+        assert!(sender.is_nil());
+        remove_connection(53);
     }
 }

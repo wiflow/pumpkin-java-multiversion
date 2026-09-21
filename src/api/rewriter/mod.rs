@@ -1,4 +1,5 @@
 pub mod block;
+pub mod chat;
 pub mod command;
 pub mod entity;
 pub mod item;

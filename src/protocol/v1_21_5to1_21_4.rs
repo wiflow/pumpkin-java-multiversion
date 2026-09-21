@@ -1,6 +1,3 @@
-use pumpkin_data::entity::EntityType;
-use pumpkin_util::version::JavaMinecraftVersion;
-
 use crate::api::rewriter::entity::{read_spawn, replace, spawned_type};
 use crate::api::rewriter::item::ClientItemT;
 use crate::api::types::{HASHED_ITEM, HashedItem, I16T, Item, VAR_INT};
@@ -10,6 +7,8 @@ use crate::api::{
 use crate::packet::legacy::CSpawnExperienceOrb;
 use crate::packet::mappings::{clientbound, serverbound};
 use crate::pipeline::item_pass;
+use pumpkin_data::entity::EntityType;
+use pumpkin_util::version::JavaMinecraftVersion;
 
 pub struct Protocol1_21_5To1_21_4;
 
@@ -24,6 +23,7 @@ impl Protocol for Protocol1_21_5To1_21_4 {
     fn register(&self, reg: &mut Registry) {
         reg.clientbound(&clientbound::play::ADD_ENTITY, add_entity);
         reg.serverbound_layout(&serverbound::play::CONTAINER_CLICK, container_click);
+        reg.clientbound_layout(&clientbound::play::PLAYER_CHAT, player_chat);
     }
 }
 
@@ -99,6 +99,17 @@ fn add_entity(
     )
 }
 
+/// The index of the message in the receiver's own stream is new in 1.21.5.
+fn player_chat(
+    wrapper: &mut PacketWrapper,
+    _connection: &mut UserConnection,
+    _ctx: &Ctx,
+) -> Result<(), TranslateError> {
+    wrapper.read(&VAR_INT)?;
+    wrapper.passthrough_all();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +174,51 @@ mod tests {
                 "{version}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod player_tests {
+    use super::*;
+    use crate::api::remove_connection;
+    use crate::pipeline::translate_clientbound;
+    use pumpkin_protocol::ClientPacket;
+    use pumpkin_protocol::codec::var_int::VarInt;
+    use pumpkin_protocol::java::client::play::{CPlayerChatMessage, FilterType};
+    use pumpkin_util::text::TextComponent;
+    /// minecraft-data 1.21.3 `packet_player_chat` starts at the sender uuid;
+    /// 1.21.5 puts the receiver's own message index in front of it.
+    #[test]
+    fn the_global_index_is_new_in_1_21_5() {
+        let version = JavaMinecraftVersion::V_1_21_4;
+        let mut payload = Vec::new();
+        CPlayerChatMessage::new(
+            VarInt(4),
+            uuid::Uuid::nil(),
+            VarInt(0),
+            None,
+            "hi".into(),
+            0,
+            0,
+            Box::new([]),
+            None,
+            FilterType::PassThrough,
+            VarInt(8),
+            TextComponent::text("bob"),
+            None,
+        )
+        .write_packet_data(&mut payload, &version)
+        .unwrap();
+
+        let out = translate_clientbound(
+            75,
+            version,
+            5,
+            clientbound::play::PLAYER_CHAT.v26_3,
+            &payload,
+        )
+        .unwrap();
+        assert_eq!(out.payload, payload[1..]);
+        remove_connection(75);
     }
 }

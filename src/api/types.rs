@@ -157,6 +157,29 @@ impl WireType for ByteArrayT {
 
 pub const BYTE_ARRAY: ByteArrayT = ByteArrayT;
 
+/// A run of bytes whose length the layout fixes, such as a chat signature.
+#[derive(Clone, Copy, Debug)]
+pub struct FixedBytesT(pub usize);
+
+impl WireType for FixedBytesT {
+    type Value = Vec<u8>;
+
+    fn read(&self, r: &mut &[u8]) -> Result<Self::Value, ReadingError> {
+        Ok(r.read_slice_borrowed(self.0)?.to_vec())
+    }
+
+    fn write(&self, w: &mut Vec<u8>, v: &Self::Value) -> Result<(), WritingError> {
+        if v.len() != self.0 {
+            return Err(WritingError::Message(format!(
+                "expected {} bytes, got {}",
+                self.0,
+                v.len()
+            )));
+        }
+        w.write_slice(v)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct RemainingBytesT;
 
