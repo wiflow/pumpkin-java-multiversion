@@ -11,7 +11,10 @@ use pumpkin_util::version::JavaMinecraftVersion;
 use crate::api::protocol::packet_key;
 #[cfg(test)]
 use crate::api::remove_connection;
-use crate::api::{Ctx, MappingData, PacketWrapper, Registry, Translated, with_connection};
+use crate::api::{
+    Ctx, MappingData, PacketWrapper, Registry, TranslateError, Translated, with_connection,
+};
+use crate::packet::mappings::PacketId;
 use crate::protocol::STEPS;
 use core_layout::core_layout_floor;
 
@@ -51,6 +54,13 @@ fn steps_for(version: JavaMinecraftVersion) -> usize {
         .count()
 }
 
+fn dropped(packet: &PacketId, version: JavaMinecraftVersion, stage: &str, error: &TranslateError) {
+    tracing::debug!(
+        "{version}: 26.3 packet {} dropped at {stage}: {error}",
+        packet.v26_3
+    );
+}
+
 pub fn translate_clientbound(
     key: u64,
     version: JavaMinecraftVersion,
@@ -73,6 +83,7 @@ pub fn translate_clientbound(
                 layout,
                 MappingData::get().composed(layout),
             )
+            .map_err(|error| dropped(packet, version, "id pass", &error))
             .ok()?;
         } else {
             wrapper.passthrough_all();
@@ -97,11 +108,17 @@ pub fn translate_clientbound(
                     mappings: MappingData::get().step(step.from),
                     layout,
                 };
-                (entry.handler)(&mut wrapper, connection, &ctx).ok()?;
+                (entry.handler)(&mut wrapper, connection, &ctx)
+                    .map_err(|error| dropped(packet, version, "step", &error))
+                    .ok()?;
             }
         }
 
-        let translated = wrapper.finish().ok().flatten()?;
+        let translated = wrapper
+            .finish()
+            .map_err(|error| dropped(packet, version, "finish", &error))
+            .ok()
+            .flatten()?;
         if translated.packet.to_id(version) == -1 {
             return None;
         }
@@ -144,7 +161,9 @@ pub fn translate_serverbound(
                     mappings: MappingData::get().step(step.from),
                     layout,
                 };
-                (entry.handler)(&mut wrapper, connection, &ctx).ok()?;
+                (entry.handler)(&mut wrapper, connection, &ctx)
+                    .map_err(|error| dropped(packet, version, "step", &error))
+                    .ok()?;
             }
         }
 
@@ -156,12 +175,17 @@ pub fn translate_serverbound(
                 layout,
                 MappingData::get().composed(layout),
             )
+            .map_err(|error| dropped(packet, version, "id pass", &error))
             .ok()?;
         } else {
             wrapper.passthrough_all();
         }
 
-        let translated = wrapper.finish().ok().flatten()?;
+        let translated = wrapper
+            .finish()
+            .map_err(|error| dropped(packet, version, "finish", &error))
+            .ok()
+            .flatten()?;
         if translated.packet.v26_3 == -1 {
             return None;
         }

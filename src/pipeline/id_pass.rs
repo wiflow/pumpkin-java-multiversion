@@ -9,6 +9,7 @@ use pumpkin_util::version::JavaMinecraftVersion;
 
 use crate::api::protocol::packet_key;
 use crate::api::rewriter::entity as entity_rewriter;
+use crate::api::rewriter::{block, command, particle, screen, sound, stats};
 use crate::api::{ComposedMappings, IdPass, PacketWrapper, TranslateError, UserConnection};
 use crate::packet::mappings::{PacketId, clientbound, serverbound};
 use crate::packet::{block_update, chunk_remap, entity, join, status, update_tags};
@@ -84,6 +85,22 @@ fn table() -> &'static HashMap<usize, IdPass> {
             &serverbound::play::CONTAINER_CLICK,
             item_pass::click_container,
         );
+        put(&clientbound::play::SOUND, sound::sound);
+        put(&clientbound::play::SOUND_ENTITY, sound::sound);
+        put(&clientbound::play::EXPLODE, particle::explode);
+        put(
+            &clientbound::play::LEVEL_PARTICLES,
+            particle::level_particles,
+        );
+        put(
+            &clientbound::play::BLOCK_ENTITY_DATA,
+            block::block_entity_data,
+        );
+        put(&clientbound::play::BLOCK_EVENT, block::block_event);
+        put(&clientbound::play::AWARD_STATS, stats::award_stats);
+        put(&clientbound::play::COMMANDS, command::commands);
+        put(&clientbound::play::OPEN_SCREEN, screen::open_screen);
+        put(&clientbound::play::MAP_ITEM_DATA, screen::map_item_data);
 
         table
     })

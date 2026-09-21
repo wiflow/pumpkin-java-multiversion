@@ -8,8 +8,10 @@
 //! palettes are renumbered here.
 //!
 //! Only the block palette is touched. Biome ids index the biome registry that
-//! was negotiated during configuration, and the surrounding bytes (heightmaps,
-//! block entities, light) are copied through untouched.
+//! was negotiated during configuration, and the surrounding bytes (heightmaps
+//! and light) are copied through untouched. Block entities carry a type id
+//! from 1.18 and go through `rewriter::block`; below that they are full NBT
+//! naming their type, which needs no table.
 //!
 //! Two shapes are parsed. From 1.18 a chunk is heightmaps plus a blob of
 //! sections that each carry a block *and* a biome palette container, with no
@@ -42,6 +44,7 @@ use pumpkin_protocol::codec::var_int::VarInt;
 use pumpkin_protocol::ser::{NetworkReadExt, NetworkWriteExt};
 use pumpkin_util::version::JavaMinecraftVersion;
 
+use crate::api::rewriter::block::rewrite_chunk_block_entities;
 use crate::remap::block_state_remap::remap_block_state_for_version;
 
 /// Oldest version whose chunk layout this parser understands. 1.16.2 is where
@@ -263,8 +266,8 @@ pub fn remap_chunk_payload(payload: &[u8], version: JavaMinecraftVersion) -> Opt
     out.write_var_int(&VarInt(i32::try_from(sections_out.len()).ok()?))
         .ok()?;
     out.extend_from_slice(&sections_out);
-    // Block entities and light data are version independent here.
-    out.extend_from_slice(rest);
+    // The light data behind the block entities needs no renumbering.
+    out.extend_from_slice(&rewrite_chunk_block_entities(rest, version)?);
 
     Some(out)
 }

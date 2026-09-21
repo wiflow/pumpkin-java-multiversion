@@ -57,6 +57,26 @@ fn table() -> &'static HashMap<usize, JavaMinecraftVersion> {
         put(&clientbound::play::SET_ENTITY_DATA, V::V_1_7_2);
         // java/client/play/update_attributes.rs: branches at 1.7.6, 1.16, 1.17, 1.20.5 and 1.21.
         put(&clientbound::play::UPDATE_ATTRIBUTES, V::V_1_7_2);
+        // java/client/play/sound_effect.rs: branches at 1.19.3, 1.19, 1.10 and 1.9.
+        put(&clientbound::play::SOUND, V::V_1_7_2);
+        // java/client/play/entity_sound_effect.rs: branches at 1.19.3, 1.19 and 1.10.
+        put(&clientbound::play::SOUND_ENTITY, V::V_1_7_2);
+        // java/client/play/explode.rs: branches at 1.21.9, 1.21.2, 1.20.5, 1.20.3, 1.19.3 and 1.17.
+        put(&clientbound::play::EXPLODE, V::V_1_7_2);
+        // java/client/play/particle.rs: branches at 26.3, 1.21.4, 1.20.5, 1.19, 1.15, 1.8 and 1.7.6.
+        put(&clientbound::play::LEVEL_PARTICLES, V::V_1_7_2);
+        // java/client/play/block_entity_data.rs: branches at 1.20.2, 1.18 and 1.8.
+        put(&clientbound::play::BLOCK_ENTITY_DATA, V::V_1_7_2);
+        // java/client/play/block_event.rs: no branch beyond write_block_pos.
+        put(&clientbound::play::BLOCK_EVENT, V::V_1_14);
+        // java/client/play/award_stats.rs: no branch; the container is the same from 1.13.
+        put(&clientbound::play::AWARD_STATS, V::V_1_13);
+        // java/client/play/commands.rs: the identifier form below 1.19; the packet starts at 1.13.
+        put(&clientbound::play::COMMANDS, V::V_1_13);
+        // java/client/play/open_screen.rs: no branch; the menu is an id from 1.14.
+        put(&clientbound::play::OPEN_SCREEN, V::V_1_14);
+        // java/client/play/map_item_data.rs: branches at 1.17, 1.14, 1.13 and 1.9.
+        put(&clientbound::play::MAP_ITEM_DATA, V::V_1_7_2);
         // java/client/play/recipe_book_add.rs: no branch on the container.
         put(&clientbound::play::RECIPE_BOOK_ADD, V::V_26_3);
         // java/client/play/set_container_content.rs: branches at 1.17.1 and 1.21.2.
