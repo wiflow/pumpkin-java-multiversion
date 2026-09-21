@@ -1,9 +1,9 @@
-use pumpkin_protocol::codec::var_int::VarInt;
-use pumpkin_util::version::JavaMinecraftVersion;
-
 use crate::api::types::{BOOL, I8, I16T, U8, VAR_INT, WireType};
 use crate::api::{Ctx, PacketWrapper, Protocol, Registry, Step, TranslateError, UserConnection};
+use crate::packet::chunk_legacy;
 use crate::packet::mappings::{clientbound, serverbound};
+use pumpkin_protocol::codec::var_int::VarInt;
+use pumpkin_util::version::JavaMinecraftVersion;
 
 pub struct Protocol1_17To1_16_4;
 
@@ -17,6 +17,7 @@ impl Protocol for Protocol1_17To1_16_4 {
 
     fn register(&self, reg: &mut Registry) {
         reg.serverbound_layout(&serverbound::play::CONTAINER_CLICK, container_click);
+        reg.clientbound_layout(&clientbound::play::LEVEL_CHUNK_WITH_LIGHT, chunk);
     }
 }
 
@@ -60,6 +61,17 @@ fn confirmation(window: i8, action: i16) -> Result<Vec<u8>, TranslateError> {
     Ok(payload)
 }
 
+/// 1.16 reads a "full chunk" flag and a varint mask where 1.17 reads a bit set.
+fn chunk(
+    wrapper: &mut PacketWrapper,
+    _connection: &mut UserConnection,
+    ctx: &Ctx,
+) -> Result<(), TranslateError> {
+    let out = chunk_legacy::to_v1_16(wrapper.remaining(), &ctx.mappings.blockstates)
+        .ok_or(TranslateError::Unsupported("chunk"))?;
+    wrapper.replace_remaining(out);
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;

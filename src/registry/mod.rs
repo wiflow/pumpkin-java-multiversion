@@ -4,13 +4,6 @@
 //! and the client rejects the entire registry load rather than the offending
 //! entry. [`generated`] holds the registry contents for each supported version,
 //! produced from that version's datapack by `tools/registry-codegen`.
-//!
-//! 1.20.5 is the oldest version with this packet at all: below it the whole
-//! registry set arrives as one NBT blob in a single packet (that is the tier 3
-//! config stall). From 1.20.5 up the payload is the same shape -- registry id,
-//! entry count, then per entry an id, a "has data" flag and network NBT with
-//! no root name -- so the parser here needs no version branch for protocol
-//! 766, and `REGISTRY_V_1_20_5` supplies that version's own NBT.
 
 pub mod generated;
 
@@ -36,10 +29,8 @@ fn read_registry_id(payload: &[u8]) -> Option<(String, &[u8])> {
     Some((registry_id, cursor))
 }
 
-/// Parses the entries that follow the registry id, skipping over each entry's
-/// NBT only far enough to find where it ends. The root tag is not always a
-/// compound (`block_transformer` entries are lists), so this walks the tag
-/// rather than reading a document.
+/// Walks each entry's NBT tag rather than reading a document, since the root isn't
+/// always a compound (`block_transformer` entries are lists).
 fn read_entries(mut cursor: &[u8]) -> Option<Vec<IncomingEntry<'_>>> {
     let count = usize::try_from(cursor.get_var_int().ok()?.0).ok()?;
 
@@ -61,21 +52,16 @@ fn read_entries(mut cursor: &[u8]) -> Option<Vec<IncomingEntry<'_>>> {
         };
         entries.push(IncomingEntry { entry_id, data });
     }
-    Some(entries)
+    cursor.is_empty().then_some(entries)
 }
 
-/// Rewrites a `REGISTRY_DATA` payload for `version`.
+/// Rewrites a `REGISTRY_DATA` payload for `version`. Entries the datapack knows are
+/// replaced with that version's NBT; unknown entries keep their slot (the server
+/// refers to them by position) but get a stand-in, since one undecodable entry
+/// fails the whole registry load.
 ///
-/// Entries the version's datapack knows are replaced with that version's NBT.
-/// Entries it does not know (26.3 additions such as new biomes or songs) keep
-/// their slot, since the client numbers entries by position and the server
-/// refers to those numbers later, but carry a stand-in copied from a known
-/// entry: the old client cannot parse the 26.3 NBT, and one bad entry fails
-/// the whole registry load.
-///
-/// Returns `None` when this plugin has no registry data for `version`, and
-/// `Some(None)` when the version has no such registry at all, in which case the
-/// packet should be dropped rather than sent with entries the client cannot use.
+/// `None` means no registry data for `version`; `Some(None)` means the version has
+/// no such registry, so the packet should be dropped.
 #[must_use]
 #[allow(clippy::option_option)]
 pub fn build_registry_payload(
@@ -85,9 +71,6 @@ pub fn build_registry_payload(
     let registries = generated::get_synced(version)?;
     let (registry_id, rest) = read_registry_id(payload)?;
 
-    // Generated ids are bare ("worldgen/biome"); the wire form is namespaced.
-    // Decide on the registry before touching its entries, so one the version
-    // does not have is dropped even if its entries could not be walked.
     let wanted = registry_id
         .strip_prefix("minecraft:")
         .unwrap_or(&registry_id);
@@ -98,8 +81,7 @@ pub fn build_registry_payload(
 
     let incoming = read_entries(rest)?;
 
-    // Stand-in for entries this version does not have. Plains is the least
-    // surprising biome to render an unknown one as; elsewhere any entry does.
+    // plains is the least surprising stand-in for an unknown biome
     let fallback = registry
         .entries
         .iter()
@@ -135,46 +117,41 @@ pub fn build_registry_payload(
     Some(Some(buf))
 }
 
-/// Rewrites the single-compound `REGISTRY_DATA` payload that 1.20.2 to 1.20.4
-/// clients receive.
+/// Builds the single-compound `REGISTRY_DATA` payload that 1.20.2 to 1.20.4
+/// clients receive out of the per registry packets 1.20.5 and up get.
 ///
-/// Those versions get every synced registry in one packet, as one unnamed
-/// network NBT compound in the vanilla layout
-///
-/// ```text
-/// { "<registry id>": { "type": "<registry id>",
-///                      "value": [ { "name": str, "id": int,
-///                                   "element": <tag> }, ... ] }, ... }
-/// ```
-///
-/// The rewrite does for that bundle what [`build_registry_payload`] does for
-/// the per registry packets of 1.20.5 and up: a registry the version does not
-/// have is left out of the compound entirely, and every entry of a kept
-/// registry keeps the server's name, its position and its id but carries this
-/// version's own NBT. A name the version does not know keeps its slot with a
-/// stand-in element, since the server refers to entries by the id it sent.
-///
-/// Returns `None` when there is no registry data for `version` or the payload
-/// is not a bundle this can parse in full; the caller drops the packet then,
-/// because a partly rewritten bundle fails the client's whole registry load.
+/// Does for those versions what [`build_registry_payload`] does for the per registry
+/// packets: unknown registries are left out, known entries carry this version's own NBT.
+/// `None` means no registry data for `version` or a packet failed to parse; the caller
+/// drops the whole bundle rather than send a partial one.
 #[must_use]
-pub fn build_registry_bundle_payload(
+pub fn bundle_registry_packets(
     version: JavaMinecraftVersion,
-    payload: &[u8],
+    packets: &[Vec<u8>],
 ) -> Option<Vec<u8>> {
-    let root = read_unnamed_compound(payload)?;
+    let mut root = NbtCompound::new();
+    for payload in packets {
+        let (registry_id, rest) = read_registry_id(payload)?;
+        let mut values = Vec::new();
+        for (index, entry) in read_entries(rest)?.iter().enumerate() {
+            let mut value = NbtCompound::new();
+            value.put_string("name", entry.entry_id.clone());
+            value.put_int("id", i32::try_from(index).ok()?);
+            value.put("element", NbtTag::Compound(NbtCompound::new()));
+            values.push(NbtTag::Compound(value));
+        }
+        let mut body = NbtCompound::new();
+        body.put_string("type", registry_id.clone());
+        body.put_list("value", values);
+        root.put(&registry_id, NbtTag::Compound(body));
+    }
+
     let out = rewrite_registry_codec(version, &root)?;
     Some(pumpkin_nbt::Nbt::from(out).write_unnamed().to_vec())
 }
 
-/// The element NBT `version`'s datapack has for one `dimension_type` entry,
-/// as a whole tag (type id then payload).
-///
-/// 1.16.2 to 1.18.2 repeat the current dimension's element inline in the join
-/// and respawn packets instead of naming it, so it has to be replaced the same
-/// way the codec is. `name` may be bare or namespaced; an unknown name falls
-/// back to the overworld, which is what the server itself does when it cannot
-/// find the dimension.
+/// The element NBT `version`'s datapack has for one `dimension_type` entry.
+/// `name` may be bare or namespaced; an unknown name falls back to the overworld.
 #[must_use]
 pub fn dimension_type_element(version: JavaMinecraftVersion, name: &str) -> Option<&'static [u8]> {
     let registries = generated::get_synced(version)?;
@@ -191,25 +168,9 @@ pub fn dimension_type_element(version: JavaMinecraftVersion, name: &str) -> Opti
         .map(|entry| entry.data)
 }
 
-/// The current dimension's `min_y` and `height`. 1.16.x carries neither and
-/// is fixed at 0 to 255.
-#[must_use]
-pub fn dimension_bounds(version: JavaMinecraftVersion, name: &str) -> Option<(i32, i32)> {
-    let element = read_unnamed_compound(dimension_type_element(version, name)?)?;
-    Some((
-        element.get_int("min_y").unwrap_or(0),
-        element.get_int("height").unwrap_or(256),
-    ))
-}
-
-/// Rewrites the registry codec compound in place: registries `version` does
-/// not have are left out, and every kept entry keeps the server's name and id
-/// but carries this version's own element NBT.
-///
-/// Shared by the configuration `REGISTRY_DATA` bundle of 1.20.2 to 1.20.4 and
-/// by the dimension codec inside the play `LOGIN` packet of 1.16.2 to 1.20.1:
-/// the two carry the same compound, only the NBT root differs (unnamed on
-/// 1.20.2 and up, a named empty root below it).
+/// Rewrites the registry codec compound in place: unknown registries are left out,
+/// kept entries keep the server's name and id but carry this version's own element NBT.
+/// Shared by the 1.20.2-1.20.4 `REGISTRY_DATA` bundle and the 1.16.2-1.20.1 dimension codec.
 #[must_use]
 pub fn rewrite_registry_codec(
     version: JavaMinecraftVersion,
@@ -219,20 +180,15 @@ pub fn rewrite_registry_codec(
 
     let mut out = NbtCompound::new();
     for (registry_key, registry_value) in &root.child_tags {
-        // Generated ids are bare ("worldgen/biome"); the wire form is namespaced.
         let bare = registry_key
             .strip_prefix("minecraft:")
             .unwrap_or(registry_key);
         let Some(registry) = registries.iter().find(|r| r.registry_id == bare) else {
-            // A registry this version does not have: leave it out rather than
-            // hand the client entries it cannot decode.
             continue;
         };
         let body = registry_value.extract_compound()?;
         let incoming = body.get_list("value")?;
 
-        // Stand-in for entries this version does not have. Plains is the least
-        // surprising biome to render an unknown one as; elsewhere any entry does.
         let fallback = registry
             .entries
             .iter()
@@ -271,17 +227,16 @@ pub fn rewrite_registry_codec(
 }
 
 /// Reads `data` as one unnamed network NBT compound, rejecting trailing bytes.
-fn read_unnamed_compound(data: &[u8]) -> Option<NbtCompound> {
+#[cfg(test)]
+pub(crate) fn read_unnamed_compound(data: &[u8]) -> Option<NbtCompound> {
     match read_tag(data)? {
         NbtTag::Compound(compound) => Some(compound),
         _ => None,
     }
 }
 
-/// Reads one whole NBT tag (type id then payload, no root name), rejecting
-/// trailing bytes. Registry elements are compounds in practice, but the
-/// generated data stores whatever tag that version's datapack held.
-fn read_tag(data: &[u8]) -> Option<NbtTag> {
+/// Reads one whole NBT tag (type id then payload, no root name), rejecting trailing bytes.
+pub(crate) fn read_tag(data: &[u8]) -> Option<NbtTag> {
     let mut cursor = Cursor::new(data);
     let mut reader = NbtReadHelperJava::new(&mut cursor);
     let tag_id = reader.get_u8().ok()?;
@@ -296,49 +251,32 @@ fn read_tag(data: &[u8]) -> Option<NbtTag> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pumpkin_nbt::Nbt;
+    use pumpkin_protocol::ser::NetworkWriteExt;
 
-    /// One `{ name, id, element }` entry as the server writes it.
-    fn entry(name: &str, id: i32) -> NbtTag {
-        let mut element = NbtCompound::new();
-        element.put_string("marker", "from-server".to_string());
-        let mut entry = NbtCompound::new();
-        entry.put_string("name", name.to_string());
-        entry.put_int("id", id);
-        entry.put("element", NbtTag::Compound(element));
-        NbtTag::Compound(entry)
-    }
-
-    fn registry(id: &str, entries: Vec<NbtTag>) -> NbtTag {
-        let mut body = NbtCompound::new();
-        body.put_string("type", id.to_string());
-        body.put_list("value", entries);
-        NbtTag::Compound(body)
+    fn packet(registry_id: &str, names: &[&str]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.write_string(registry_id).unwrap();
+        buf.write_var_int(&VarInt(i32::try_from(names.len()).unwrap()))
+            .unwrap();
+        for name in names {
+            buf.write_string(&format!("minecraft:{name}")).unwrap();
+            buf.write_bool(true).unwrap();
+            buf.extend_from_slice(&[0x0a, 0x00]);
+        }
+        buf
     }
 
     #[test]
-    fn bundle_drops_unknown_registries_and_replaces_elements() {
-        let mut root = NbtCompound::new();
-        root.put(
-            "minecraft:worldgen/biome",
-            registry(
-                "minecraft:worldgen/biome",
-                vec![
-                    entry("minecraft:plains", 0),
-                    // 26.3 only: 1.20.3 has no pale garden.
-                    entry("minecraft:pale_garden", 1),
-                ],
-            ),
-        );
-        // 1.20.3 has no wolf_variant registry at all.
-        root.put(
-            "minecraft:wolf_variant",
-            registry("minecraft:wolf_variant", vec![entry("minecraft:pale", 0)]),
-        );
-        let payload = Nbt::from(root).write_unnamed().to_vec();
-
-        let out = build_registry_bundle_payload(JavaMinecraftVersion::V_1_20_3, &payload)
-            .expect("bundle rewritten");
+    fn the_bundle_drops_unknown_registries_and_replaces_elements() {
+        let version = JavaMinecraftVersion::V_1_20_3;
+        let out = bundle_registry_packets(
+            version,
+            &[
+                packet("minecraft:worldgen/biome", &["plains", "pale_garden"]),
+                packet("minecraft:wolf_variant", &["pale"]),
+            ],
+        )
+        .expect("bundle built");
         let rewritten = read_unnamed_compound(&out).expect("output parses");
 
         assert!(
@@ -352,13 +290,12 @@ mod tests {
         let values = biome.get_list("value").expect("value list");
         assert_eq!(values.len(), 2, "entry count and order kept");
 
-        let generated = generated::get_synced(JavaMinecraftVersion::V_1_20_3)
-            .expect("1.20.3 registry data")
-            .iter()
-            .find(|r| r.registry_id == "worldgen/biome")
-            .expect("biome registry generated");
-        let plains_nbt = read_tag(
-            generated
+        let plains = read_tag(
+            generated::get_synced(version)
+                .expect("1.20.3 registry data")
+                .iter()
+                .find(|r| r.registry_id == "worldgen/biome")
+                .expect("biome registry generated")
                 .entries
                 .iter()
                 .find(|e| e.name == "plains")
@@ -367,49 +304,43 @@ mod tests {
         )
         .expect("plains nbt parses");
 
-        for (index, (name, id)) in [("minecraft:plains", 0), ("minecraft:pale_garden", 1)]
+        for (index, name) in ["minecraft:plains", "minecraft:pale_garden"]
             .into_iter()
             .enumerate()
         {
             let value = values[index].extract_compound().expect("entry compound");
             assert_eq!(value.get_string("name"), Some(name), "name kept");
-            assert_eq!(value.get_int("id"), Some(id), "id kept");
-            let element = value.get("element").expect("element");
-            assert!(
-                element
-                    .extract_compound()
-                    .is_some_and(|c| c.get_string("marker").is_none()),
-                "the server's element is replaced"
+            assert_eq!(
+                value.get_int("id"),
+                Some(i32::try_from(index).unwrap()),
+                "id kept"
             );
-            // Both the known name and the one 1.20.3 lacks end up as this
-            // version's plains: the latter through the stand-in rule.
-            assert_eq!(element, &plains_nbt, "this version's own NBT");
+            assert_eq!(
+                value.get("element"),
+                Some(&plains),
+                "this version's own NBT"
+            );
         }
     }
 
     #[test]
-    fn bundle_with_trailing_bytes_is_dropped() {
-        let mut root = NbtCompound::new();
-        root.put(
-            "minecraft:worldgen/biome",
-            registry(
-                "minecraft:worldgen/biome",
-                vec![entry("minecraft:plains", 0)],
-            ),
-        );
-        let mut payload = Nbt::from(root).write_unnamed().to_vec();
-        payload.push(0);
+    fn a_packet_that_does_not_parse_drops_the_bundle() {
+        let mut extra = packet("minecraft:worldgen/biome", &["plains"]);
+        extra.push(0);
         assert!(
-            build_registry_bundle_payload(JavaMinecraftVersion::V_1_20_3, &payload).is_none(),
-            "a bundle with bytes left over is not a bundle this understood"
+            bundle_registry_packets(JavaMinecraftVersion::V_1_20_3, &[extra]).is_none(),
+            "a bundle is built whole or not at all"
         );
     }
 
     #[test]
-    fn bundle_that_does_not_parse_is_dropped() {
+    fn a_version_without_registry_data_drops_the_bundle() {
         assert!(
-            build_registry_bundle_payload(JavaMinecraftVersion::V_1_20_3, &[0x0a, 0x08]).is_none(),
-            "a truncated bundle is dropped rather than half rewritten"
+            bundle_registry_packets(
+                JavaMinecraftVersion::V_1_16_1,
+                &[packet("minecraft:worldgen/biome", &["plains"])],
+            )
+            .is_none()
         );
     }
 }

@@ -1,30 +1,9 @@
 //! Rewrites the play `LOGIN` (join) and `RESPAWN` packets for clients that
 //! have no configuration state.
 //!
-//! 1.16.2 to 1.20.1 receive the whole registry set as one NBT "dimension
-//! codec" inside the join packet instead of a configuration `REGISTRY_DATA`
-//! packet, and 1.16.2 to 1.18.2 repeat the current dimension's own
-//! `dimension_type` element inline, in both join and respawn. Core fills both
-//! from 26.3 data, whose NBT those clients cannot decode: a biome with
-//! `has_precipitation` where the codec wants `precipitation`, a dimension type
-//! with `min_y` where 1.16.2 has none, registries (`damage_type`,
-//! `trim_pattern`) that did not exist yet. One entry the client's codec
-//! rejects fails the whole registry load, so the codec is replaced wholesale
-//! with the version's own data from `crate::registry`.
-//!
-//! Entry ids stay positional, exactly as the 1.20.2 bundle rewrite keeps them:
-//! the server refers to biomes and dimensions by the number it sent, so an
-//! entry this version does not have keeps its slot and carries a stand-in.
-//!
-//! Both rewrites are total. The packet is parsed field by field in the
-//! client's own layout, as core wrote it, and re-serialised; anything that
-//! does not parse, or leaves bytes over, drops the packet rather than going
-//! out half rewritten.
-//!
-//! Field order per version is minecraft-data `packet_login` and
-//! `packet_respawn` for 1.16.5, 1.17.1, 1.18.2, 1.19, 1.19.2, 1.19.3, 1.19.4,
-//! 1.20 and 1.20.1, which is also what core's `CLogin`/`CRespawn` writers
-//! produce.
+//! 1.16.2 to 1.20.1 get the whole registry set inline as an NBT "dimension codec",
+//! replaced wholesale with the version's own data since 26.3's data would not decode.
+//! Entry ids stay positional: an entry this version lacks keeps its slot with a stand-in.
 
 use std::io::Cursor;
 
@@ -41,7 +20,7 @@ use pumpkin_util::version::JavaMinecraftVersion;
 pub const OLDEST_LAYOUT: JavaMinecraftVersion = JavaMinecraftVersion::V_1_16_2;
 
 /// First version whose registries travel in the configuration state instead,
-/// where `crate::registry::build_registry_bundle_payload` takes over.
+/// where `crate::registry::bundle_registry_packets` takes over.
 pub const FIRST_WITH_CONFIG_STATE: JavaMinecraftVersion = JavaMinecraftVersion::V_1_20_2;
 
 /// First version that names its dimension type instead of repeating the whole
@@ -112,9 +91,7 @@ pub fn rewrite_login(payload: &[u8], version: JavaMinecraftVersion) -> Option<Ve
     }
 
     let codec = take_named_nbt(&mut read)?;
-    // 1.16.2 to 1.18.2 write the dimension type element here, 1.19 and up its
-    // name. The element carries no name of its own, so the dimension is taken
-    // from the world name that follows it, which is what core writes there.
+    // 1.16.2 to 1.18.2 write the dimension type element here instead of its name.
     if inline_dimension {
         take_named_nbt(&mut read)?;
     }
@@ -218,10 +195,11 @@ pub fn rewrite_respawn(payload: &[u8], version: JavaMinecraftVersion) -> Option<
 /// kept-data flag (1 each).
 const RESPAWN_TAIL_LEN: usize = 8 + 5;
 
-/// The dimension bounds a `LOGIN` payload names, for the versions whose join
-/// packet carries the dimension inline or by name.
+/// The bounds of the world a `LOGIN` payload names, as the server has it. The
+/// sections of a chunk packet are laid out against those, whatever the client
+/// itself thinks its world is.
 #[must_use]
-pub fn login_dimension_bounds(payload: &[u8], version: JavaMinecraftVersion) -> Option<(i32, i32)> {
+pub fn login_world_bounds(payload: &[u8], version: JavaMinecraftVersion) -> Option<(i32, i32)> {
     if version < OLDEST_LAYOUT || version >= FIRST_WITH_CONFIG_STATE {
         return None;
     }
@@ -238,8 +216,23 @@ pub fn login_dimension_bounds(payload: &[u8], version: JavaMinecraftVersion) -> 
     if version < FIRST_WITH_DIMENSION_NAME {
         take_named_nbt(&mut read)?;
     }
-    let name = read.get_str().ok()?;
-    crate::registry::dimension_bounds(version, &name)
+    world_bounds(&read.get_str().ok()?)
+}
+
+/// The same for a `RESPAWN`, whose dimension element is followed by the world
+/// name on every version below 1.19.
+#[must_use]
+pub fn respawn_world_bounds(payload: &[u8], version: JavaMinecraftVersion) -> Option<(i32, i32)> {
+    if version < OLDEST_LAYOUT || version >= FIRST_WITH_DIMENSION_NAME {
+        return None;
+    }
+    let mut read: &[u8] = payload;
+    take_named_nbt(&mut read)?;
+    world_bounds(&read.get_str().ok()?)
+}
+
+fn world_bounds(name: &str) -> Option<(i32, i32)> {
+    pumpkin_data::dimension::Dimension::from_name(name).map(|d| (d.min_y, d.height))
 }
 
 /// Reads the 1.19+ optional last death position: a flag, then a dimension name
@@ -578,12 +571,8 @@ mod tests {
         }
     }
 
-    /// End to end against core's own writer: the join packet core produces
-    /// for each version in the tier, rewritten and walked back. This is the
-    /// check that the parser here and `CLogin::write_packet_data` agree, and
-    /// that the registries core puts in the codec below 1.20.2 (dimension
-    /// type, biome, chat type, damage type, trim pattern, trim material) come
-    /// out as the subset the client actually has.
+    /// End to end against core's own writer, checking the parser here agrees
+    /// with `CLogin::write_packet_data`.
     #[test]
     fn cores_own_join_packet_is_rewritten_for_every_tier_version() {
         use pumpkin_data::dimension::Dimension;

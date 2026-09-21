@@ -1,8 +1,9 @@
-use pumpkin_util::version::JavaMinecraftVersion;
-
 use crate::api::types::{BOOL, I8, STRING, U8, VAR_INT};
 use crate::api::{Ctx, PacketWrapper, Protocol, Registry, Step, TranslateError, UserConnection};
+use crate::packet::chunk_legacy;
+use crate::packet::mappings::clientbound;
 use crate::packet::mappings::serverbound;
+use pumpkin_util::version::JavaMinecraftVersion;
 
 pub struct Protocol1_18To1_17_1;
 
@@ -16,6 +17,7 @@ impl Protocol for Protocol1_18To1_17_1 {
 
     fn register(&self, reg: &mut Registry) {
         reg.serverbound_layout(&serverbound::play::CLIENT_INFORMATION, client_information);
+        reg.clientbound_layout(&clientbound::play::LEVEL_CHUNK_WITH_LIGHT, chunk);
     }
 }
 
@@ -37,6 +39,23 @@ fn client_information(
     Ok(())
 }
 
+/// 1.17.1 names its sections with a bit mask, takes the biomes as one array
+/// for the whole column and reads light from its own packet.
+fn chunk(
+    wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
+    ctx: &Ctx,
+) -> Result<(), TranslateError> {
+    let out = chunk_legacy::to_v1_17(
+        wrapper.remaining(),
+        connection.entity_tracker.min_y,
+        &ctx.mappings.blockstates,
+        ctx.layout,
+    )
+    .ok_or(TranslateError::Unsupported("chunk"))?;
+    wrapper.replace_remaining(out);
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;

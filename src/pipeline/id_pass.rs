@@ -297,11 +297,6 @@ fn registry_data(
     layout: JavaMinecraftVersion,
     _ids: &ComposedMappings,
 ) -> Result<(), TranslateError> {
-    if layout >= JavaMinecraftVersion::V_1_20_2 && layout < JavaMinecraftVersion::V_1_20_5 {
-        return rewrite(wrapper, "registry bundle", |payload| {
-            registry::build_registry_bundle_payload(layout, payload)
-        });
-    }
     let out = registry::build_registry_payload(layout, wrapper.remaining());
     match out {
         Some(Some(payload)) => wrapper.replace_remaining(payload),
@@ -336,7 +331,7 @@ fn login(
             .entity_tracker
             .add(entity_id, EntityType::PLAYER.id);
     }
-    if let Some((min_y, height)) = join::login_dimension_bounds(wrapper.remaining(), layout) {
+    if let Some((min_y, height)) = join::login_world_bounds(wrapper.remaining(), layout) {
         connection.entity_tracker.min_y = min_y;
         connection.entity_tracker.height = height;
     }
@@ -362,6 +357,10 @@ fn respawn(
         connection
             .entity_tracker
             .add(entity_id, EntityType::PLAYER.id);
+    }
+    if let Some((min_y, height)) = join::respawn_world_bounds(wrapper.remaining(), layout) {
+        connection.entity_tracker.min_y = min_y;
+        connection.entity_tracker.height = height;
     }
     if layout >= join::FIRST_WITH_DIMENSION_NAME {
         wrapper.passthrough_all();

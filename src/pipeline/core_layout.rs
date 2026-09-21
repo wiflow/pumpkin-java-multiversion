@@ -78,8 +78,10 @@ fn table() -> &'static HashMap<usize, JavaMinecraftVersion> {
             table.insert(packet_key(packet), floor);
         };
 
-        // net/java/chunk_data/mod.rs: v1_16 below 1.18, v1_18 from it.
-        put(&clientbound::play::LEVEL_CHUNK_WITH_LIGHT, V::V_1_16_2);
+        // net/java/chunk_data/mod.rs: the v1_18 writer on every version, so nothing below it.
+        put(&clientbound::play::LEVEL_CHUNK_WITH_LIGHT, V::V_1_18);
+        // java/client/play/light_update.rs: branches at 1.17 for the masks and 1.16 for trust edges.
+        put(&clientbound::play::LIGHT_UPDATE, V::V_1_14);
         // java/client/play/block_update.rs: no branch beyond write_block_pos, which packs 1.14 style from 1.14.
         put(&clientbound::play::BLOCK_UPDATE, V::V_1_14);
         // java/client/play/multi_block_update.rs: branches at 1.16 and 1.7.6.
@@ -94,8 +96,8 @@ fn table() -> &'static HashMap<usize, JavaMinecraftVersion> {
         put(&clientbound::play::UPDATE_TAGS, V::V_1_13);
         // java/client/config/update_tags.rs: no branch; the configuration state starts at 1.20.2.
         put(&clientbound::config::UPDATE_TAGS, V::V_1_20_2);
-        // net/java/config/known_packs.rs: the bundle below 1.20.5, one packet per registry from it.
-        put(&clientbound::config::REGISTRY_DATA, V::V_1_20_2);
+        // java/client/config/registry_data.rs: no branch; this is the per registry form of 1.20.5.
+        put(&clientbound::config::REGISTRY_DATA, V::V_1_20_5);
         // java/client/status/status_response.rs: one json string on every version.
         put(&clientbound::status::STATUS_RESPONSE, V::V_1_7_2);
         // java/client/play/login.rs: branches from 1.8 up.
@@ -149,6 +151,8 @@ fn table() -> &'static HashMap<usize, JavaMinecraftVersion> {
         put(&clientbound::play::COOLDOWN, V::V_1_21_2);
         // java/client/play/update_advancement.rs: branches at 1.20, 1.20.2, 1.21.5, 26.1 and 26.3.
         put(&clientbound::play::UPDATE_ADVANCEMENTS, V::V_1_7_2);
+        // net/java/play/tag_query.rs: the root is always written unnamed, which is the 1.20.2 form.
+        put(&clientbound::play::TAG_QUERY, V::V_1_20_2);
 
         table
     })
@@ -174,7 +178,7 @@ mod tests {
         );
         assert_eq!(
             core_layout_floor(&clientbound::play::LEVEL_CHUNK_WITH_LIGHT),
-            JavaMinecraftVersion::V_1_16_2
+            JavaMinecraftVersion::V_1_18
         );
     }
 

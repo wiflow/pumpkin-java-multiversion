@@ -1,6 +1,4 @@
 pub mod api;
-#[cfg(not(target_family = "wasm"))]
-pub mod chunk;
 pub mod data;
 pub mod packet;
 pub mod pipeline;
@@ -49,7 +47,6 @@ impl Plugin for MultiVersionPlugin {
     fn on_load(&self, context: Context) -> Result<(), String> {
         tracing::info!("Loading Pumpkin Java Multi-Version Plugin...");
 
-        // Register packet event handlers with High priority to translate before/after game logic
         context.register_event_handler(PacketReceivedHandler, EventPriority::Highest, true)?;
 
         context.register_event_handler(PacketSentHandler, EventPriority::Lowest, true)?;
@@ -192,20 +189,7 @@ impl EventHandler<PlayerLeaveEvent> for PlayerLeaveHandler {
 
 /// Turns the first login packet for a client below the supported floor into a
 /// disconnect with a readable reason, and drops everything else meant for it.
-///
-/// The status response is left alone on purpose: with the server's own
-/// protocol in it the client's server list already shows the version as
-/// incompatible. During login the server's first packet (compression or the
-/// game profile) is replaced, so the client reads the disconnect before any
-/// compression takes effect on its side.
-///
-/// This keeps working for the versions just under the tier 4 floor. The login
-/// `DISCONNECT` is packet 0 on every version minecraft-data has, 1.16.1 (736)
-/// and 1.12.2 (340) included, and its single field is a JSON chat string on
-/// all of them, which is exactly what is written here. `to_id` also falls back
-/// to the 26.3 column for [`JavaMinecraftVersion::Unknown`], where that column
-/// is 0 as well, so a protocol number no version claims is refused rather than
-/// silently let through.
+/// The status response is left alone since the client already shows itself as incompatible there.
 fn refuse_unsupported(
     mut event: PacketSentEventData,
     version: JavaMinecraftVersion,
@@ -255,9 +239,6 @@ mod tests {
     use crate::packet::{LOWEST_SUPPORTED, is_version_supported};
     use pumpkin_util::version::JavaMinecraftVersion;
 
-    /// `refuse_unsupported` can only send the disconnect if the version has an
-    /// id for it. Checked against minecraft-data, where `login.toClient`
-    /// `disconnect` is `0x00` for 1.12.2, 1.16.1 and every version between.
     #[test]
     fn versions_below_the_floor_still_have_a_login_disconnect() {
         for version in [
@@ -279,8 +260,6 @@ mod tests {
         }
     }
 
-    /// The floor itself, and the version directly under it, are on the right
-    /// sides of the comparison the handler uses.
     #[test]
     fn the_floor_is_1_16_2() {
         assert_eq!(LOWEST_SUPPORTED, JavaMinecraftVersion::V_1_16_2);
