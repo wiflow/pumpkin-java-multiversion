@@ -1,5 +1,7 @@
+use pumpkin_data::data_component::DataComponent;
 use pumpkin_nbt::tag::NbtTag;
 use pumpkin_protocol::codec::bit_set::BitSet;
+use pumpkin_protocol::codec::data_component;
 use pumpkin_protocol::codec::var_int::VarInt;
 use pumpkin_protocol::codec::var_long::VarLong;
 use pumpkin_protocol::ser::{
@@ -294,6 +296,393 @@ impl WireType for TextComponentT {
         w.write_component(v, &self.version)
     }
 }
+
+/// One component of a stack, payload bytes as they arrived.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ItemComponent {
+    pub id: i32,
+    pub data: Vec<u8>,
+}
+
+/// A stack in whichever form its layout carries, components still encoded.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Item {
+    Empty,
+    Structured {
+        count: i32,
+        id: i32,
+        added: Vec<ItemComponent>,
+        removed: Vec<i32>,
+    },
+    Nbt {
+        id: i32,
+        count: i8,
+        nbt: Option<NbtTag>,
+    },
+}
+
+impl Item {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
+    #[must_use]
+    pub const fn item_id(&self) -> Option<i32> {
+        match self {
+            Self::Empty => None,
+            Self::Structured { id, .. } | Self::Nbt { id, .. } => Some(*id),
+        }
+    }
+}
+
+const MAX_COMPONENTS: i32 = 256;
+
+/// How many bytes component `id` takes in the 26.3 encoding. Core's own
+/// component reader is the measure; one it cannot read ends the stack.
+pub fn component_payload_len(id: i32, bytes: &[u8]) -> Result<usize, ReadingError> {
+    let component = u8::try_from(id)
+        .ok()
+        .and_then(DataComponent::try_from_id)
+        .ok_or_else(|| ReadingError::Message(format!("unknown component {id}")))?;
+    let mut cursor = bytes;
+    data_component::deserialize(component, &mut cursor)?;
+    Ok(bytes.len() - cursor.len())
+}
+
+/// The structured form from 1.20.5, the NBT form below it.
+///
+/// `length_prefixed` is the form a client from 1.21.5 sends for an untrusted
+/// stack, where every component payload carries its own length.
+#[derive(Clone, Copy, Debug)]
+pub struct ItemT {
+    version: JavaMinecraftVersion,
+    length_prefixed: bool,
+}
+
+impl ItemT {
+    pub const FIRST_STRUCTURED: JavaMinecraftVersion = JavaMinecraftVersion::V_1_20_5;
+
+    #[must_use]
+    pub const fn for_version(version: JavaMinecraftVersion) -> Self {
+        Self {
+            version,
+            length_prefixed: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn length_prefixed(version: JavaMinecraftVersion) -> Self {
+        Self {
+            version,
+            length_prefixed: true,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_structured(&self) -> bool {
+        self.version.protocol_version() >= Self::FIRST_STRUCTURED.protocol_version()
+    }
+
+    fn read_structured(&self, r: &mut &[u8]) -> Result<Item, ReadingError> {
+        let count = r.get_var_int()?.0;
+        if count == 0 {
+            return Ok(Item::Empty);
+        }
+        let id = r.get_var_int()?.0;
+        let to_add = r.get_var_int()?.0;
+        let to_remove = r.get_var_int()?.0;
+        if !(0..=MAX_COMPONENTS).contains(&to_add) || !(0..=MAX_COMPONENTS).contains(&to_remove) {
+            return Err(ReadingError::Message(
+                "component count out of bounds".into(),
+            ));
+        }
+
+        let mut added = Vec::with_capacity(to_add as usize);
+        for _ in 0..to_add {
+            let id = r.get_var_int()?.0;
+            let len = if self.length_prefixed {
+                usize::try_from(r.get_var_int()?.0)
+                    .map_err(|_| ReadingError::Message("negative component length".into()))?
+            } else {
+                component_payload_len(id, r)?
+            };
+            let data = r.read_slice_borrowed(len)?.to_vec();
+            added.push(ItemComponent { id, data });
+        }
+
+        let mut removed = Vec::with_capacity(to_remove as usize);
+        for _ in 0..to_remove {
+            removed.push(r.get_var_int()?.0);
+        }
+
+        Ok(Item::Structured {
+            count,
+            id,
+            added,
+            removed,
+        })
+    }
+
+    fn write_structured(&self, w: &mut Vec<u8>, v: &Item) -> Result<(), WritingError> {
+        let Item::Structured {
+            count,
+            id,
+            added,
+            removed,
+        } = v
+        else {
+            return w.write_var_int(&VarInt(0));
+        };
+        w.write_var_int(&VarInt(*count))?;
+        w.write_var_int(&VarInt(*id))?;
+        w.write_var_int(&VarInt(
+            i32::try_from(added.len()).unwrap_or(MAX_COMPONENTS),
+        ))?;
+        w.write_var_int(&VarInt(
+            i32::try_from(removed.len()).unwrap_or(MAX_COMPONENTS),
+        ))?;
+        for component in added {
+            w.write_var_int(&VarInt(component.id))?;
+            if self.length_prefixed {
+                w.write_var_int(&VarInt(i32::try_from(component.data.len()).map_err(
+                    |_| WritingError::Message("component too large".to_string()),
+                )?))?;
+            }
+            w.write_slice(&component.data)?;
+        }
+        for id in removed {
+            w.write_var_int(&VarInt(*id))?;
+        }
+        Ok(())
+    }
+}
+
+impl WireType for ItemT {
+    type Value = Item;
+
+    fn read(&self, r: &mut &[u8]) -> Result<Self::Value, ReadingError> {
+        if self.is_structured() {
+            return self.read_structured(r);
+        }
+        if !r.get_bool()? {
+            return Ok(Item::Empty);
+        }
+        let id = r.get_var_int()?.0;
+        let count = r.get_i8()?;
+        let nbt = r.get_nbt_borrowed(&self.version)?;
+        Ok(Item::Nbt { id, count, nbt })
+    }
+
+    fn write(&self, w: &mut Vec<u8>, v: &Self::Value) -> Result<(), WritingError> {
+        if self.is_structured() {
+            return self.write_structured(w, v);
+        }
+        let Item::Nbt { id, count, nbt } = v else {
+            return w.write_bool(false);
+        };
+        w.write_bool(true)?;
+        w.write_var_int(&VarInt(*id))?;
+        w.write_i8(*count)?;
+        w.write_nbt_with_version(nbt.as_ref(), &self.version)
+    }
+}
+
+/// The cost of a merchant offer from 1.20.5: never absent, no removals, and
+/// the count sits after the item id.
+#[derive(Clone, Copy, Debug)]
+pub struct ItemCostT;
+
+impl WireType for ItemCostT {
+    type Value = Item;
+
+    fn read(&self, r: &mut &[u8]) -> Result<Self::Value, ReadingError> {
+        let id = r.get_var_int()?.0;
+        let count = r.get_var_int()?.0;
+        let to_add = r.get_var_int()?.0;
+        if !(0..=MAX_COMPONENTS).contains(&to_add) {
+            return Err(ReadingError::Message(
+                "component count out of bounds".into(),
+            ));
+        }
+        let mut added = Vec::with_capacity(to_add as usize);
+        for _ in 0..to_add {
+            let id = r.get_var_int()?.0;
+            let len = component_payload_len(id, r)?;
+            let data = r.read_slice_borrowed(len)?.to_vec();
+            added.push(ItemComponent { id, data });
+        }
+        Ok(Item::Structured {
+            count,
+            id,
+            added,
+            removed: Vec::new(),
+        })
+    }
+
+    fn write(&self, w: &mut Vec<u8>, v: &Self::Value) -> Result<(), WritingError> {
+        let (count, id, added) = match v {
+            Item::Structured {
+                count, id, added, ..
+            } => (*count, *id, added.as_slice()),
+            _ => (0, 0, [].as_slice()),
+        };
+        w.write_var_int(&VarInt(id))?;
+        w.write_var_int(&VarInt(count))?;
+        w.write_var_int(&VarInt(
+            i32::try_from(added.len()).unwrap_or(MAX_COMPONENTS),
+        ))?;
+        for component in added {
+            w.write_var_int(&VarInt(component.id))?;
+            w.write_slice(&component.data)?;
+        }
+        Ok(())
+    }
+}
+
+pub const ITEM_COST: ItemCostT = ItemCostT;
+
+/// A stack nested in a component, and the advancement icon from 26.1: the
+/// item id leads the count and an empty stack cannot be expressed.
+#[derive(Clone, Copy, Debug)]
+pub struct TemplateItemT;
+
+impl WireType for TemplateItemT {
+    type Value = Item;
+
+    fn read(&self, r: &mut &[u8]) -> Result<Self::Value, ReadingError> {
+        let id = r.get_var_int()?.0;
+        let count = r.get_var_int()?.0;
+        let to_add = r.get_var_int()?.0;
+        let to_remove = r.get_var_int()?.0;
+        if !(0..=MAX_COMPONENTS).contains(&to_add) || !(0..=MAX_COMPONENTS).contains(&to_remove) {
+            return Err(ReadingError::Message(
+                "component count out of bounds".into(),
+            ));
+        }
+        let mut added = Vec::with_capacity(to_add as usize);
+        for _ in 0..to_add {
+            let id = r.get_var_int()?.0;
+            let len = component_payload_len(id, r)?;
+            added.push(ItemComponent {
+                id,
+                data: r.read_slice_borrowed(len)?.to_vec(),
+            });
+        }
+        let mut removed = Vec::with_capacity(to_remove as usize);
+        for _ in 0..to_remove {
+            removed.push(r.get_var_int()?.0);
+        }
+        Ok(Item::Structured {
+            count,
+            id,
+            added,
+            removed,
+        })
+    }
+
+    fn write(&self, w: &mut Vec<u8>, v: &Self::Value) -> Result<(), WritingError> {
+        let (count, id, added, removed) = match v {
+            Item::Structured {
+                count,
+                id,
+                added,
+                removed,
+            } => (*count, *id, added.as_slice(), removed.as_slice()),
+            _ => (1, 0, [].as_slice(), [].as_slice()),
+        };
+        w.write_var_int(&VarInt(id))?;
+        w.write_var_int(&VarInt(count))?;
+        w.write_var_int(&VarInt(
+            i32::try_from(added.len()).unwrap_or(MAX_COMPONENTS),
+        ))?;
+        w.write_var_int(&VarInt(
+            i32::try_from(removed.len()).unwrap_or(MAX_COMPONENTS),
+        ))?;
+        for component in added {
+            w.write_var_int(&VarInt(component.id))?;
+            w.write_slice(&component.data)?;
+        }
+        for id in removed {
+            w.write_var_int(&VarInt(*id))?;
+        }
+        Ok(())
+    }
+}
+
+pub const TEMPLATE_ITEM: TemplateItemT = TemplateItemT;
+
+/// The hash a client from 1.21.5 sends in place of a component payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HashedItem {
+    pub id: i32,
+    pub count: i32,
+    pub added: Vec<(i32, i32)>,
+    pub removed: Vec<i32>,
+}
+
+/// The serverbound stack from 1.21.5: an optional id, count and component hashes.
+#[derive(Clone, Copy, Debug)]
+pub struct HashedItemT;
+
+impl WireType for HashedItemT {
+    type Value = Option<HashedItem>;
+
+    fn read(&self, r: &mut &[u8]) -> Result<Self::Value, ReadingError> {
+        if !r.get_bool()? {
+            return Ok(None);
+        }
+        let id = r.get_var_int()?.0;
+        let count = r.get_var_int()?.0;
+        let added_len = r.get_var_int()?.0;
+        if !(0..=MAX_COMPONENTS).contains(&added_len) {
+            return Err(ReadingError::Message("added_length out of bounds".into()));
+        }
+        let mut added = Vec::with_capacity(added_len as usize);
+        for _ in 0..added_len {
+            added.push((r.get_var_int()?.0, r.get_i32_be()?));
+        }
+        let removed_len = r.get_var_int()?.0;
+        if !(0..=MAX_COMPONENTS).contains(&removed_len) {
+            return Err(ReadingError::Message("removed_length out of bounds".into()));
+        }
+        let mut removed = Vec::with_capacity(removed_len as usize);
+        for _ in 0..removed_len {
+            removed.push(r.get_var_int()?.0);
+        }
+        Ok(Some(HashedItem {
+            id,
+            count,
+            added,
+            removed,
+        }))
+    }
+
+    fn write(&self, w: &mut Vec<u8>, v: &Self::Value) -> Result<(), WritingError> {
+        let Some(item) = v else {
+            return w.write_bool(false);
+        };
+        w.write_bool(true)?;
+        w.write_var_int(&VarInt(item.id))?;
+        w.write_var_int(&VarInt(item.count))?;
+        w.write_var_int(&VarInt(
+            i32::try_from(item.added.len()).unwrap_or(MAX_COMPONENTS),
+        ))?;
+        for (id, hash) in &item.added {
+            w.write_var_int(&VarInt(*id))?;
+            w.write_i32_be(*hash)?;
+        }
+        w.write_var_int(&VarInt(
+            i32::try_from(item.removed.len()).unwrap_or(MAX_COMPONENTS),
+        ))?;
+        for id in &item.removed {
+            w.write_var_int(&VarInt(*id))?;
+        }
+        Ok(())
+    }
+}
+
+pub const HASHED_ITEM: HashedItemT = HashedItemT;
 
 #[cfg(test)]
 mod tests {

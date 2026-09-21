@@ -59,6 +59,22 @@ fn table() -> &'static HashMap<usize, JavaMinecraftVersion> {
         put(&clientbound::play::UPDATE_ATTRIBUTES, V::V_1_7_2);
         // java/client/play/recipe_book_add.rs: no branch on the container.
         put(&clientbound::play::RECIPE_BOOK_ADD, V::V_26_3);
+        // java/client/play/set_container_content.rs: branches at 1.17.1 and 1.21.2.
+        put(&clientbound::play::CONTAINER_SET_CONTENT, V::V_1_7_2);
+        // java/client/play/set_container_slot.rs: the same two branches.
+        put(&clientbound::play::CONTAINER_SET_SLOT, V::V_1_7_2);
+        // java/client/play/set_cursor_slot.rs: the stack alone, no branch.
+        put(&clientbound::play::SET_CURSOR_ITEM, V::V_1_7_2);
+        // java/client/play/set_player_inventory.rs: a slot and the stack, no branch.
+        put(&clientbound::play::SET_PLAYER_INVENTORY, V::V_1_7_2);
+        // java/client/play/set_equipment.rs: branches at 1.7.6, 1.9, 1.16 and 1.20.5.
+        put(&clientbound::play::SET_EQUIPMENT, V::V_1_7_2);
+        // java/client/play/merchant_offers.rs: branches at 1.19 and 1.20.5.
+        put(&clientbound::play::MERCHANT_OFFERS, V::V_1_7_2);
+        // java/client/play/item_cooldown.rs: an item id below 1.21.2, a group from it.
+        put(&clientbound::play::COOLDOWN, V::V_1_7_2);
+        // java/client/play/update_advancement.rs: branches at 1.20, 1.20.2, 1.21.5, 26.1 and 26.3.
+        put(&clientbound::play::UPDATE_ADVANCEMENTS, V::V_1_7_2);
 
         table
     })

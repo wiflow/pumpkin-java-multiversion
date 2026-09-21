@@ -1,5 +1,6 @@
 pub mod core_layout;
 pub mod id_pass;
+pub mod item_pass;
 mod tables;
 
 use std::collections::HashSet;

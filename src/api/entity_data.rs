@@ -5,6 +5,7 @@ use pumpkin_protocol::codec::var_int::VarInt;
 use pumpkin_protocol::ser::{NetworkReadExt, NetworkWriteExt, ReadingError, WritingError};
 use pumpkin_util::version::JavaMinecraftVersion;
 
+use crate::api::rewriter::item::rewrite_item_value;
 use crate::api::types::{NbtT, STRING, VAR_INT, VAR_LONG, WireType};
 use crate::data::entity_data_types::{MetaKind, meta_kind};
 use crate::data::mappings::{ComposedMappings, MappingData};
@@ -202,7 +203,7 @@ fn read_value(
             }
             return Some(MetaValue::Particles(particles));
         }
-        MetaKind::Item => return Some(MetaValue::Item(item_value(r, layout, ids)?)),
+        MetaKind::Item => return Some(MetaValue::Item(rewrite_item_value(r, layout, ids)?)),
     };
     Some(MetaValue::Raw(raw))
 }
@@ -241,22 +242,13 @@ fn read_particle(
         ParticleData::Int | ParticleData::Float => (None, take(r, 4)?),
         ParticleData::IntFloat => (None, take(r, 8)?),
         ParticleData::VarInt => (None, raw(&VAR_INT, r)?),
-        ParticleData::Item => (None, item_value(r, layout, ids)?),
+        ParticleData::Item => (None, rewrite_item_value(r, layout, ids)?),
     };
     Some(ParticleValue {
         id,
         block_state,
         data,
     })
-}
-
-/// The item rewriter's seam, `crate::api::rewriter::item::rewrite_item_value`.
-fn item_value(
-    _r: &mut &[u8],
-    _layout: JavaMinecraftVersion,
-    _ids: &ComposedMappings,
-) -> Option<Vec<u8>> {
-    None
 }
 
 /// The layout does not change, so a value with no id inside goes back verbatim.
@@ -396,16 +388,17 @@ mod tests {
         assert!(read.is_empty());
     }
 
-    /// Nothing after an item can be found again until the item rewriter lands.
+    /// An empty stack is a single zero varint in the 26.3 form and stays one.
     #[test]
-    fn an_item_ends_the_list() {
+    fn an_item_entry_is_read_through_the_item_rewriter() {
         let payload = vec![0u8, 0, 0x08, 8, 7, 0, 9, 3, 0, 0, 0, 0, TERMINATOR];
         let mut read: &[u8] = &payload;
         let entries = EntityDataListT::for_version(V::V_1_21_4)
             .read(&mut read)
             .unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].index, 0);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[1].index, 8);
+        assert_eq!(entries[1].value, MetaValue::Item(vec![0]));
         assert!(read.is_empty());
     }
 

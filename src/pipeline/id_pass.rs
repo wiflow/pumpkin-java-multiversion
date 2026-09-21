@@ -10,8 +10,9 @@ use pumpkin_util::version::JavaMinecraftVersion;
 use crate::api::protocol::packet_key;
 use crate::api::rewriter::entity as entity_rewriter;
 use crate::api::{ComposedMappings, IdPass, PacketWrapper, TranslateError, UserConnection};
-use crate::packet::mappings::{PacketId, clientbound};
+use crate::packet::mappings::{PacketId, clientbound, serverbound};
 use crate::packet::{block_update, chunk_remap, entity, join, status, update_tags};
+use crate::pipeline::item_pass;
 use crate::registry;
 use crate::remap::block_state_remap::remap_block_state_for_version;
 use crate::remap::entity_id_remap::remap_object_type_for_version;
@@ -52,6 +53,37 @@ fn table() -> &'static HashMap<usize, IdPass> {
         );
         put(&clientbound::play::LOGIN, login);
         put(&clientbound::play::RESPAWN, respawn);
+        put(
+            &clientbound::play::CONTAINER_SET_CONTENT,
+            item_pass::container_content,
+        );
+        put(
+            &clientbound::play::CONTAINER_SET_SLOT,
+            item_pass::container_slot,
+        );
+        put(&clientbound::play::SET_CURSOR_ITEM, item_pass::cursor_item);
+        put(
+            &clientbound::play::SET_PLAYER_INVENTORY,
+            item_pass::player_inventory,
+        );
+        put(&clientbound::play::SET_EQUIPMENT, item_pass::equipment);
+        put(
+            &clientbound::play::MERCHANT_OFFERS,
+            item_pass::merchant_offers,
+        );
+        put(&clientbound::play::COOLDOWN, item_pass::cooldown);
+        put(
+            &clientbound::play::UPDATE_ADVANCEMENTS,
+            item_pass::advancements,
+        );
+        put(
+            &serverbound::play::SET_CREATIVE_MODE_SLOT,
+            item_pass::creative_slot,
+        );
+        put(
+            &serverbound::play::CONTAINER_CLICK,
+            item_pass::click_container,
+        );
 
         table
     })
