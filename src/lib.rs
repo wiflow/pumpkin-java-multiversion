@@ -103,6 +103,14 @@ impl EventHandler<PacketReceivedEvent> for PacketReceivedHandler {
             Some(translated) => {
                 event.packet_id = translated.packet.v26_3;
                 event.raw_payload = translated.payload;
+                event.reply_packets = translated
+                    .replies
+                    .into_iter()
+                    .filter_map(|(packet, payload)| {
+                        let id = packet.to_id(version);
+                        (id != -1).then_some((id, payload))
+                    })
+                    .collect();
             }
             // No 26.3 equivalent. Forwarding it unchanged makes the server
             // read the id as whatever packet now occupies that slot and

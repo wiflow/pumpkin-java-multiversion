@@ -1,4 +1,3 @@
-use pumpkin_protocol::codec::var_int::VarInt;
 use pumpkin_util::version::JavaMinecraftVersion as V;
 
 use crate::api::rewriter::item::{ClientItemT, StructuredItemRewriter, item_pass};
@@ -76,8 +75,7 @@ pub fn player_inventory(
     item_pass(wrapper, layout, ids)
 }
 
-/// From 1.16 the entries run until one without the continuation bit; core has
-/// already left out the slots the client's enum does not reach.
+/// From 1.16 the entries run until one without the continuation bit.
 pub fn equipment(
     wrapper: &mut PacketWrapper,
     _connection: &mut UserConnection,
@@ -108,7 +106,7 @@ pub fn equipment(
 }
 
 /// A trade's two costs are the item cost form from 1.20.5 and plain stacks
-/// below it, where 1.19 dropped the flag in front of the second one.
+/// below it.
 pub fn merchant_offers(
     wrapper: &mut PacketWrapper,
     _connection: &mut UserConnection,
@@ -132,9 +130,9 @@ pub fn merchant_offers(
                 cost(wrapper, layout, ids)?;
             }
         } else {
-            item_pass(wrapper, layout, ids)?;
-            item_pass(wrapper, layout, ids)?;
-            if layout >= V::V_1_19 || wrapper.passthrough(&BOOL)? {
+            // The second cost is a bare slot; an absent one is an empty stack,
+            // which is the same single byte core writes for it.
+            for _ in 0..3 {
                 item_pass(wrapper, layout, ids)?;
             }
         }
@@ -160,29 +158,6 @@ fn cost(
     let item = wrapper.read(&ITEM_COST)?;
     let out = StructuredItemRewriter::to_version(&item, layout, ids);
     wrapper.write(&ITEM_COST, &out)
-}
-
-/// Cooldown groups arrive in 1.21.2; below that core writes the 26.3 id of
-/// the item the cooldown applies to.
-pub fn cooldown(
-    wrapper: &mut PacketWrapper,
-    _connection: &mut UserConnection,
-    layout: V,
-    ids: &ComposedMappings,
-) -> Result<(), TranslateError> {
-    if layout >= V::V_1_21_2 {
-        wrapper.passthrough(&STRING)?;
-    } else {
-        let item = wrapper.read(&VAR_INT)?;
-        let mapped = u32::try_from(item.0)
-            .ok()
-            .and_then(|id| ids.items.map(id))
-            .and_then(|id| i32::try_from(id).ok())
-            .unwrap_or(0);
-        wrapper.write(&VAR_INT, &VarInt(mapped))?;
-    }
-    wrapper.passthrough(&VAR_INT)?;
-    Ok(())
 }
 
 pub fn advancements(
@@ -285,47 +260,42 @@ pub fn creative_slot(
     Ok(())
 }
 
-/// Clients from 1.21.5 send component hashes; below that they send the whole
-/// stack in their own layout and core reads it as a 26.3 one.
-pub fn click_container(
-    wrapper: &mut PacketWrapper,
-    _connection: &mut UserConnection,
-    layout: V,
-    ids: &ComposedMappings,
-) -> Result<(), TranslateError> {
-    container_id(wrapper, layout)?;
-    if layout >= V::V_1_17_1 {
+/// The fields ahead of the changed slot list. Core reads the container id and
+/// the state id in the widths it branches on, so both follow the client.
+pub fn click_frame(wrapper: &mut PacketWrapper, version: V) -> Result<(), TranslateError> {
+    container_id(wrapper, version)?;
+    if version >= V::V_1_17_1 {
         wrapper.passthrough(&VAR_INT)?;
+    } else {
+        wrapper.passthrough(&I16T)?;
     }
     wrapper.passthrough(&I16T)?;
     wrapper.passthrough(&I8)?;
-    if layout < V::V_1_17 {
-        wrapper.passthrough(&I16T)?;
-    }
     wrapper.passthrough(&VAR_INT)?;
-    if layout < V::V_1_17 {
-        return clicked(wrapper, layout, ids);
-    }
+    Ok(())
+}
+
+/// Every stack is a hash by the time the id pass runs: clients below 1.21.5
+/// send whole ones and the step at that boundary has already hashed them.
+pub fn click_container(
+    wrapper: &mut PacketWrapper,
+    connection: &mut UserConnection,
+    _layout: V,
+    ids: &ComposedMappings,
+) -> Result<(), TranslateError> {
+    click_frame(wrapper, connection.version)?;
     let changed = wrapper.passthrough(&VAR_INT)?.0;
     if !(0..=256).contains(&changed) {
         return Err(TranslateError::Unsupported("changed slot count"));
     }
     for _ in 0..changed {
         wrapper.passthrough(&I16T)?;
-        clicked(wrapper, layout, ids)?;
+        clicked(wrapper, ids)?;
     }
-    clicked(wrapper, layout, ids)
+    clicked(wrapper, ids)
 }
 
-fn clicked(
-    wrapper: &mut PacketWrapper,
-    layout: V,
-    ids: &ComposedMappings,
-) -> Result<(), TranslateError> {
-    if layout < V::V_1_21_5 {
-        wrapper.passthrough(&ClientItemT::new(layout, ids))?;
-        return Ok(());
-    }
+fn clicked(wrapper: &mut PacketWrapper, ids: &ComposedMappings) -> Result<(), TranslateError> {
     let hashed = wrapper.read(&HASHED_ITEM)?;
     let out = hashed.and_then(|mut item| {
         item.id = map(ids.items_inverse(), item.id)?;
@@ -356,6 +326,7 @@ mod tests {
     use crate::api::types::{Item, ItemComponent, ItemT, WireType};
     use crate::packet::mappings::{clientbound, serverbound};
     use pumpkin_data::data_component::DataComponent;
+    use pumpkin_protocol::codec::var_int::VarInt;
 
     fn ids(target: V) -> &'static ComposedMappings {
         MappingData::get().composed(target)
@@ -378,6 +349,50 @@ mod tests {
         let mut out = Vec::new();
         ItemT::for_version(V::V_26_3).write(&mut out, item).unwrap();
         out
+    }
+
+    /// The two container frames core still writes itself, checked against its
+    /// own writer on both sides of the 1.17.1 and 1.21.2 boundaries.
+    #[test]
+    fn the_container_frames_core_writes_are_the_ones_the_id_pass_reads() {
+        use pumpkin_protocol::ClientPacket;
+        use pumpkin_protocol::codec::item_stack_seralizer::ItemStackSerializer;
+        use pumpkin_protocol::java::client::play::{CSetContainerContent, CSetContainerSlot};
+
+        for version in [
+            V::V_1_16_2,
+            V::V_1_17,
+            V::V_1_17_1,
+            V::V_1_20_2,
+            V::V_1_21_2,
+            V::V_26_2,
+        ] {
+            let slots = [ItemStackSerializer::from(
+                pumpkin_data::item_stack::ItemStack::new(1, &pumpkin_data::item::Item::STONE),
+            )];
+            let carried = ItemStackSerializer::from(pumpkin_data::item_stack::ItemStack::new(
+                2,
+                &pumpkin_data::item::Item::DIRT,
+            ));
+            let mut payload = Vec::new();
+            CSetContainerContent::new(VarInt(3), VarInt(9), &slots, &carried)
+                .write_packet_data(&mut payload, &version)
+                .unwrap();
+            let mut wrapper =
+                PacketWrapper::new(&clientbound::play::CONTAINER_SET_CONTENT, &payload);
+            let mut connection = UserConnection::new(0, version);
+            container_content(&mut wrapper, &mut connection, version, ids(version)).unwrap();
+            wrapper.finish().unwrap().unwrap();
+
+            let mut payload = Vec::new();
+            CSetContainerSlot::new(-1, 9, -1, &carried)
+                .write_packet_data(&mut payload, &version)
+                .unwrap();
+            let mut wrapper = PacketWrapper::new(&clientbound::play::CONTAINER_SET_SLOT, &payload);
+            let mut connection = UserConnection::new(0, version);
+            container_slot(&mut wrapper, &mut connection, version, ids(version)).unwrap();
+            wrapper.finish().unwrap().unwrap();
+        }
     }
 
     /// `md('1.21.3').protocol.play.toClient.packet_window_items`: a varint
@@ -470,46 +485,6 @@ mod tests {
         assert_eq!(U8.read(&mut read).unwrap(), 3);
         ItemT::for_version(layout).read(&mut read).unwrap();
         assert!(read.is_empty());
-    }
-
-    /// `java/client/play/item_cooldown.rs` writes the 26.3 item id below
-    /// 1.21.2 and the cooldown group from it.
-    #[test]
-    fn a_cooldown_is_an_item_id_below_1_21_2() {
-        let layout = V::V_1_21;
-        let ender_pearl = pumpkin_data::item::Item::ENDER_PEARL.id;
-        let mut payload = Vec::new();
-        VAR_INT
-            .write(&mut payload, &VarInt(i32::from(ender_pearl)))
-            .unwrap();
-        VAR_INT.write(&mut payload, &VarInt(20)).unwrap();
-
-        let mut wrapper = PacketWrapper::new(&clientbound::play::COOLDOWN, &payload);
-        let mut connection = UserConnection::new(0, layout);
-        cooldown(&mut wrapper, &mut connection, layout, ids(layout)).unwrap();
-        let out = wrapper.finish().unwrap().unwrap().payload;
-
-        let mut read: &[u8] = &out;
-        assert_eq!(
-            VAR_INT.read(&mut read).unwrap().0,
-            i32::try_from(ids(layout).items.map(u32::from(ender_pearl)).unwrap()).unwrap()
-        );
-        assert_eq!(VAR_INT.read(&mut read).unwrap().0, 20);
-    }
-
-    #[test]
-    fn a_cooldown_group_passes_through_from_1_21_2() {
-        let layout = V::V_1_21_2;
-        let mut payload = Vec::new();
-        STRING
-            .write(&mut payload, &"minecraft:ender_pearl".into())
-            .unwrap();
-        VAR_INT.write(&mut payload, &VarInt(20)).unwrap();
-
-        let mut wrapper = PacketWrapper::new(&clientbound::play::COOLDOWN, &payload);
-        let mut connection = UserConnection::new(0, layout);
-        cooldown(&mut wrapper, &mut connection, layout, ids(layout)).unwrap();
-        assert_eq!(wrapper.finish().unwrap().unwrap().payload, payload);
     }
 
     /// `md('1.21.3').protocol.play.toClient.packet_trade_list`: the first cost

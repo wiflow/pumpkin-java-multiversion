@@ -6,7 +6,8 @@ use pumpkin_protocol::{
 };
 use pumpkin_util::version::JavaMinecraftVersion;
 
-use crate::api::entity_data::{EntityDataEntry, EntityDataListT, MetaValue, ParticleValue};
+use crate::api::entity_data::{EntityDataEntry, EntityDataListT, MetaValue};
+use crate::api::rewriter::particle::write_particle;
 use crate::api::types::VAR_INT;
 use crate::api::{PacketWrapper, TranslateError, UserConnection};
 use crate::data::entity_data_types::meta_data_type_id_for_version;
@@ -59,13 +60,17 @@ fn rewrite_entries(
             Some(EntityDataEntry {
                 index: tracked_index_for_version(entity_type, entry.index, layout)?,
                 serializer: meta_data_type_id_for_version(entry.serializer, layout)?,
-                value: rewrite_value(&entry.value, ids)?,
+                value: rewrite_value(&entry.value, layout, ids)?,
             })
         })
         .collect()
 }
 
-fn rewrite_value(value: &MetaValue, ids: &ComposedMappings) -> Option<MetaValue> {
+fn rewrite_value(
+    value: &MetaValue,
+    layout: JavaMinecraftVersion,
+    ids: &ComposedMappings,
+) -> Option<MetaValue> {
     Some(match value {
         MetaValue::Raw(_) | MetaValue::Item(_) => value.clone(),
         // A state the client lacks falls back to air, as every other state id does.
@@ -75,13 +80,30 @@ fn rewrite_value(value: &MetaValue, ids: &ComposedMappings) -> Option<MetaValue>
         MetaValue::OptionalBlockState(state) => {
             MetaValue::OptionalBlockState(block_state(*state, ids))
         }
-        MetaValue::Particle(particle) => MetaValue::Particle(rewrite_particle(particle, ids)?),
-        MetaValue::Particles(particles) => MetaValue::Particles(
-            particles
-                .iter()
-                .filter_map(|particle| rewrite_particle(particle, ids))
-                .collect(),
-        ),
+        // The particle is converted here and not in the writer, because a
+        // particle the client cannot show leaves the whole entry out.
+        MetaValue::Particle(particle) => {
+            let mut out = Vec::new();
+            if !write_particle(&mut out, particle, layout, ids).ok()? {
+                return None;
+            }
+            MetaValue::Raw(out)
+        }
+        MetaValue::Particles(particles) => {
+            let mut body = Vec::new();
+            let mut kept = 0;
+            for particle in particles {
+                let mut one = Vec::new();
+                if write_particle(&mut one, particle, layout, ids).ok()? {
+                    body.extend(one);
+                    kept += 1;
+                }
+            }
+            let mut out = Vec::new();
+            out.write_var_int(&VarInt(kept)).ok()?;
+            out.extend(body);
+            MetaValue::Raw(out)
+        }
         // A holder: zero carries the variant inline, which cannot be renumbered.
         MetaValue::PaintingVariant(0) => return None,
         MetaValue::PaintingVariant(variant) => MetaValue::PaintingVariant(
@@ -96,15 +118,6 @@ fn block_state(state: i32, ids: &ComposedMappings) -> i32 {
         .and_then(|state| ids.blockstates.map(state))
         .and_then(|state| i32::try_from(state).ok())
         .unwrap_or(0)
-}
-
-/// A particle the client cannot show is left out.
-fn rewrite_particle(particle: &ParticleValue, ids: &ComposedMappings) -> Option<ParticleValue> {
-    Some(ParticleValue {
-        id: i32::try_from(ids.particles.map(u32::try_from(particle.id).ok()?)?).ok()?,
-        block_state: particle.block_state.map(|state| block_state(state, ids)),
-        data: particle.data.clone(),
-    })
 }
 
 /// Core writes the indices, serializer ids and values of 26.3 in the client's
@@ -516,5 +529,38 @@ mod tests {
         want.push(TERMINATOR);
         assert_eq!(after.payload, want);
         crate::api::remove_connection(key);
+    }
+
+    /// The geyser particles are 26.2's, so one of them inside an effect list
+    /// goes and the surviving count is written.
+    #[test]
+    fn a_particle_the_client_lacks_leaves_the_list_shorter() {
+        let layout = V::V_1_21_4;
+        let effect = u8::try_from(Particle::EntityEffect.to_id()).unwrap();
+        let geyser = u8::try_from(Particle::GeyserBase.to_id()).unwrap();
+
+        let mut payload = vec![7u8, 10, 17, 2, effect, 0x11, 0x22, 0x33, 0x44, geyser];
+        payload.extend(5i32.to_be_bytes());
+        payload.extend(1.0f32.to_be_bytes());
+        payload.push(TERMINATOR);
+
+        let mapped = MappingData::get()
+            .composed(layout)
+            .particles
+            .map(u32::from(Particle::EntityEffect.to_id()))
+            .unwrap();
+        let want = vec![
+            7,
+            10,
+            18,
+            1,
+            u8::try_from(mapped).unwrap(),
+            0x11,
+            0x22,
+            0x33,
+            0x44,
+            TERMINATOR,
+        ];
+        assert_eq!(translate(&payload, EntityType::PIG.id, layout), want);
     }
 }

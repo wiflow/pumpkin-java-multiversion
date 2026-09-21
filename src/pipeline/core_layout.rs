@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 use pumpkin_util::version::JavaMinecraftVersion;
 
 use crate::api::protocol::packet_key;
-use crate::packet::mappings::{PacketId, clientbound};
+use crate::packet::mappings::{PacketId, clientbound, serverbound};
 
 /// Lowest version core writes a correct payload for. Packets with no entry
 /// are written in 26.3 layout.
@@ -14,6 +14,59 @@ pub fn core_layout_floor(packet: &'static PacketId) -> JavaMinecraftVersion {
         .get(&packet_key(packet))
         .copied()
         .unwrap_or(JavaMinecraftVersion::V_26_3)
+}
+
+/// Lowest version core's reader takes a client's own payload for. Packets with
+/// no entry are read as sent. Where the answer is above the client, the chain
+/// converts the payload up to it, except in the fields core still branches on
+/// itself: core reads with the client's version, not with this one.
+#[must_use]
+pub fn core_read_floor(
+    packet: &'static PacketId,
+    version: JavaMinecraftVersion,
+) -> JavaMinecraftVersion {
+    read_table()
+        .get(&packet_key(packet))
+        .map_or(version, |floor| floor(version))
+}
+
+type ReadFloor = fn(JavaMinecraftVersion) -> JavaMinecraftVersion;
+
+fn read_table() -> &'static HashMap<usize, ReadFloor> {
+    static TABLE: OnceLock<HashMap<usize, ReadFloor>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        use JavaMinecraftVersion as V;
+        let mut table: HashMap<usize, ReadFloor> = HashMap::new();
+
+        // java/server/play/click_container.rs: OptionalItemStackHash::read takes
+        // no version, so core reads hashed stacks on every version.
+        table.insert(packet_key(&serverbound::play::CONTAINER_CLICK), |_| {
+            V::V_1_21_5
+        });
+        // java/server/play/chat_message.rs: the signed branch starts at 1.19 and
+        // only matches the wire from 1.19.3.
+        table.insert(packet_key(&serverbound::play::CHAT), |version| {
+            if version >= V::V_1_19 {
+                V::V_1_19_3
+            } else {
+                version
+            }
+        });
+        // java/server/play/client_information.rs: the text filtering flag is read
+        // with the 1.18 meaning from 1.17 on.
+        table.insert(
+            packet_key(&serverbound::play::CLIENT_INFORMATION),
+            |version| {
+                if version >= V::V_1_17 {
+                    V::V_1_18
+                } else {
+                    version
+                }
+            },
+        );
+
+        table
+    })
 }
 
 fn table() -> &'static HashMap<usize, JavaMinecraftVersion> {
@@ -87,12 +140,13 @@ fn table() -> &'static HashMap<usize, JavaMinecraftVersion> {
         put(&clientbound::play::SET_CURSOR_ITEM, V::V_1_7_2);
         // java/client/play/set_player_inventory.rs: a slot and the stack, no branch.
         put(&clientbound::play::SET_PLAYER_INVENTORY, V::V_1_7_2);
-        // java/client/play/set_equipment.rs: branches at 1.7.6, 1.9, 1.16 and 1.20.5.
+        // java/client/play/set_equipment.rs: branches at 1.7.6, 1.9 and 1.16.
         put(&clientbound::play::SET_EQUIPMENT, V::V_1_7_2);
         // java/client/play/merchant_offers.rs: branches at 1.19 and 1.20.5.
         put(&clientbound::play::MERCHANT_OFFERS, V::V_1_7_2);
-        // java/client/play/item_cooldown.rs: an item id below 1.21.2, a group from it.
-        put(&clientbound::play::COOLDOWN, V::V_1_7_2);
+        // java/client/play/item_cooldown.rs: no branch, the cooldown group as a
+        // string, which is the form 1.21.2 introduced.
+        put(&clientbound::play::COOLDOWN, V::V_1_21_2);
         // java/client/play/update_advancement.rs: branches at 1.20, 1.20.2, 1.21.5, 26.1 and 26.3.
         put(&clientbound::play::UPDATE_ADVANCEMENTS, V::V_1_7_2);
 
@@ -104,6 +158,14 @@ fn table() -> &'static HashMap<usize, JavaMinecraftVersion> {
 mod tests {
     use super::*;
 
+    use crate::pipeline::translate_serverbound;
+    use pumpkin_protocol::ServerPacket;
+    use pumpkin_protocol::java::server::login::SLoginStart;
+    use pumpkin_protocol::java::server::play::SSetCreativeSlot;
+
+    const LOGIN: u8 = 2;
+    const PLAY: u8 = 5;
+
     #[test]
     fn a_packet_with_no_entry_is_native() {
         assert_eq!(
@@ -114,5 +176,182 @@ mod tests {
             core_layout_floor(&clientbound::play::LEVEL_CHUNK_WITH_LIGHT),
             JavaMinecraftVersion::V_1_16_2
         );
+    }
+
+    #[test]
+    fn a_serverbound_packet_with_no_entry_is_read_as_sent() {
+        for version in [
+            JavaMinecraftVersion::V_1_16_2,
+            JavaMinecraftVersion::V_1_19,
+            JavaMinecraftVersion::V_1_20_2,
+        ] {
+            assert_eq!(
+                core_read_floor(&serverbound::login::HELLO, version),
+                version
+            );
+        }
+    }
+
+    /// minecraft-data `packet_login_start`: the name alone up to 1.18.2, plus
+    /// an optional profile key on 1.19, plus an optional uuid on 1.19.1 and
+    /// 1.19.2, name and optional uuid from 1.19.3, name and uuid from 1.20.2.
+    #[test]
+    fn every_login_start_a_client_sends_reaches_core_unchanged() {
+        for version in [
+            JavaMinecraftVersion::V_1_16_2,
+            JavaMinecraftVersion::V_1_17_1,
+            JavaMinecraftVersion::V_1_18_2,
+            JavaMinecraftVersion::V_1_19,
+            JavaMinecraftVersion::V_1_19_1,
+            JavaMinecraftVersion::V_1_19_3,
+            JavaMinecraftVersion::V_1_20,
+            JavaMinecraftVersion::V_1_20_2,
+        ] {
+            let mut payload = Vec::new();
+            payload.push(5);
+            payload.extend_from_slice(b"Notch");
+            if version >= JavaMinecraftVersion::V_1_19 && version < JavaMinecraftVersion::V_1_19_3 {
+                payload.push(0);
+            }
+            if version >= JavaMinecraftVersion::V_1_20_2 {
+                payload.extend_from_slice(&[0u8; 16]);
+            } else if version >= JavaMinecraftVersion::V_1_19_1 {
+                payload.push(1);
+                payload.extend_from_slice(&[0u8; 16]);
+            }
+
+            let wire = serverbound::login::HELLO.to_id(version);
+            let out = translate_serverbound(0, version, LOGIN, wire, &payload).expect("{version}");
+            assert_eq!(out.payload, payload, "{version}");
+            let mut read: &[u8] = &out.payload;
+            let packet = SLoginStart::read(&mut read, &version).expect("read");
+            assert_eq!(&*packet.name, "Notch", "{version}");
+            assert!(read.is_empty(), "{version}");
+        }
+    }
+
+    /// The four packets core writes all the way down keep their floor: what it
+    /// wrote for the oldest supported client is what the id pass reads back.
+    #[test]
+    fn the_effect_packets_core_writes_itself_are_read_in_the_clients_layout() {
+        use crate::pipeline::translate_clientbound;
+        use pumpkin_data::particle::Particle;
+        use pumpkin_data::sound::SoundCategory;
+        use pumpkin_protocol::ClientPacket;
+        use pumpkin_protocol::IdOr;
+        use pumpkin_protocol::codec::var_int::VarInt;
+        use pumpkin_protocol::java::client::play::{
+            CEntitySoundEffect, CExplosion, CParticle, CSoundEffect,
+        };
+        use pumpkin_util::math::vector3::Vector3;
+
+        let version = JavaMinecraftVersion::V_1_16_2;
+        let mut payloads: Vec<(&'static PacketId, Vec<u8>)> = Vec::new();
+
+        let mut bytes = Vec::new();
+        CExplosion::new(
+            Vector3::new(0.0, 0.0, 0.0),
+            4.0,
+            0,
+            None,
+            VarInt(Particle::Explosion as i32),
+            IdOr::Id(0),
+        )
+        .write_packet_data(&mut bytes, &version)
+        .unwrap();
+        payloads.push((&clientbound::play::EXPLODE, bytes));
+
+        let mut bytes = Vec::new();
+        CParticle::new(
+            false,
+            false,
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(0.1, 0.2, 0.3),
+            0.5,
+            10,
+            VarInt(Particle::Smoke as i32),
+            &[],
+        )
+        .write_packet_data(&mut bytes, &version)
+        .unwrap();
+        payloads.push((&clientbound::play::LEVEL_PARTICLES, bytes));
+
+        let mut bytes = Vec::new();
+        CSoundEffect::new(
+            IdOr::Id(3),
+            SoundCategory::Players,
+            &Vector3::new(1.0, 2.0, 3.0),
+            1.0,
+            0.5,
+            42,
+        )
+        .write_packet_data(&mut bytes, &version)
+        .unwrap();
+        payloads.push((&clientbound::play::SOUND, bytes));
+
+        let mut bytes = Vec::new();
+        CEntitySoundEffect::new(
+            IdOr::Id(3),
+            SoundCategory::Players,
+            VarInt(123),
+            1.0,
+            0.5,
+            42,
+        )
+        .write_packet_data(&mut bytes, &version)
+        .unwrap();
+        payloads.push((&clientbound::play::SOUND_ENTITY, bytes));
+
+        for (packet, payload) in payloads {
+            assert_eq!(core_layout_floor(packet), JavaMinecraftVersion::V_1_7_2);
+            assert!(
+                translate_clientbound(0, version, PLAY, packet.v26_3, &payload).is_some(),
+                "{}",
+                packet.v26_3
+            );
+        }
+    }
+
+    /// minecraft-data `packet_set_creative_slot`: a two byte slot on every
+    /// version, so only the stack itself changes shape.
+    #[test]
+    fn a_creative_slot_reaches_cores_reader_on_every_version() {
+        use crate::api::MappingData;
+        use crate::api::rewriter::item::StructuredItemRewriter;
+        use crate::api::types::{Item, ItemT, WireType};
+
+        for version in [
+            JavaMinecraftVersion::V_1_16_2,
+            JavaMinecraftVersion::V_1_20_3,
+            JavaMinecraftVersion::V_1_20_5,
+            JavaMinecraftVersion::V_1_21_4,
+            JavaMinecraftVersion::V_1_21_5,
+        ] {
+            let native = Item::Structured {
+                count: 1,
+                id: i32::from(pumpkin_data::item::Item::DIAMOND_SWORD.id),
+                added: Vec::new(),
+                removed: Vec::new(),
+            };
+            let ids = MappingData::get().composed(version);
+            let item = StructuredItemRewriter::to_version(&native, version, ids);
+            let mut payload = vec![0, 36];
+            if version >= JavaMinecraftVersion::V_1_21_5 {
+                ItemT::length_prefixed(version)
+                    .write(&mut payload, &item)
+                    .unwrap();
+            } else {
+                ItemT::for_version(version)
+                    .write(&mut payload, &item)
+                    .unwrap();
+            }
+
+            let wire = serverbound::play::SET_CREATIVE_MODE_SLOT.to_id(version);
+            let out = translate_serverbound(0, version, PLAY, wire, &payload).expect("{version}");
+            let mut read: &[u8] = &out.payload;
+            let packet = SSetCreativeSlot::read(&mut read, &version).expect("read");
+            assert_eq!(packet.slot, 36, "{version}");
+            assert!(read.is_empty(), "{version}");
+        }
     }
 }

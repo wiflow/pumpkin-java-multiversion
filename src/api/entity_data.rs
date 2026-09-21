@@ -1,11 +1,11 @@
 //! The `SET_ENTITY_DATA` entry list, read and written in one layout.
 
-use pumpkin_data::particle::Particle;
 use pumpkin_protocol::codec::var_int::VarInt;
 use pumpkin_protocol::ser::{NetworkReadExt, NetworkWriteExt, ReadingError, WritingError};
 use pumpkin_util::version::JavaMinecraftVersion;
 
 use crate::api::rewriter::item::rewrite_item_value;
+use crate::api::rewriter::particle::{PARTICLE, Particle, read_particle};
 use crate::api::types::{NbtT, STRING, VAR_INT, VAR_LONG, WireType};
 use crate::data::entity_data_types::{MetaKind, meta_kind};
 use crate::data::mappings::{ComposedMappings, MappingData};
@@ -27,50 +27,10 @@ pub enum MetaValue {
     Raw(Vec<u8>),
     BlockState(i32),
     OptionalBlockState(i32),
-    Particle(ParticleValue),
-    Particles(Vec<ParticleValue>),
+    Particle(Particle),
+    Particles(Vec<Particle>),
     PaintingVariant(i32),
     Item(Vec<u8>),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ParticleValue {
-    pub id: i32,
-    pub block_state: Option<i32>,
-    pub data: Vec<u8>,
-}
-
-#[derive(Clone, Copy)]
-enum ParticleData {
-    None,
-    BlockState,
-    Int,
-    Float,
-    VarInt,
-    IntFloat,
-    Item,
-}
-
-/// The 26.3 option data of `name` and the oldest layout that reads it the same
-/// way. `None` for the shapes that changed more than once, which end the list.
-fn particle_shape(name: &str) -> Option<(ParticleData, JavaMinecraftVersion)> {
-    use JavaMinecraftVersion as V;
-    use ParticleData as D;
-    Some(match name {
-        "block" | "block_marker" | "falling_dust" | "dust_pillar" | "block_crumble" => {
-            (D::BlockState, V::V_1_7_2)
-        }
-        // 1.20.5 folded the area effect cloud colour into the particle.
-        "entity_effect" => (D::Int, V::V_1_20_5),
-        "tinted_leaves" | "flash" => (D::Int, V::V_1_21_9),
-        "effect" | "instant_effect" => (D::IntFloat, V::V_1_21_9),
-        "dragon_breath" => (D::Float, V::V_1_21_9),
-        "sculk_charge" => (D::Float, V::V_1_7_2),
-        "shriek" => (D::VarInt, V::V_1_7_2),
-        "item" => (D::Item, V::V_1_7_2),
-        "dust" | "dust_color_transition" | "vibration" | "trail" => return None,
-        _ => (D::None, V::V_1_7_2),
-    })
 }
 
 /// Reads and writes a metadata list in `layout`; a value it cannot measure
@@ -194,12 +154,12 @@ fn read_value(
         MetaKind::PaintingVariant => {
             return Some(MetaValue::PaintingVariant(r.get_var_int().ok()?.0));
         }
-        MetaKind::Particle => return Some(MetaValue::Particle(read_particle(r, layout, ids)?)),
+        MetaKind::Particle => return Some(MetaValue::Particle(read_particle(r).ok()?)),
         MetaKind::Particles => {
             let count = r.get_var_int().ok()?.0;
             let mut particles = Vec::new();
             for _ in 0..count {
-                particles.push(read_particle(r, layout, ids)?);
+                particles.push(read_particle(r).ok()?);
             }
             return Some(MetaValue::Particles(particles));
         }
@@ -225,32 +185,6 @@ fn raw_component(r: &mut &[u8], layout: JavaMinecraftVersion) -> Option<Vec<u8>>
     }
 }
 
-fn read_particle(
-    r: &mut &[u8],
-    layout: JavaMinecraftVersion,
-    ids: &ComposedMappings,
-) -> Option<ParticleValue> {
-    let id = r.get_var_int().ok()?.0;
-    let name = Particle::from_id(u16::try_from(id).ok()?)?.to_name();
-    let (shape, since) = particle_shape(name)?;
-    if layout < since {
-        return None;
-    }
-    let (block_state, data) = match shape {
-        ParticleData::None => (None, Vec::new()),
-        ParticleData::BlockState => (Some(r.get_var_int().ok()?.0), Vec::new()),
-        ParticleData::Int | ParticleData::Float => (None, take(r, 4)?),
-        ParticleData::IntFloat => (None, take(r, 8)?),
-        ParticleData::VarInt => (None, raw(&VAR_INT, r)?),
-        ParticleData::Item => (None, rewrite_item_value(r, layout, ids)?),
-    };
-    Some(ParticleValue {
-        id,
-        block_state,
-        data,
-    })
-}
-
 /// The layout does not change, so a value with no id inside goes back verbatim.
 fn write_value(value: &MetaValue, w: &mut Vec<u8>) -> Result<(), WritingError> {
     match value {
@@ -258,31 +192,25 @@ fn write_value(value: &MetaValue, w: &mut Vec<u8>) -> Result<(), WritingError> {
         MetaValue::BlockState(id)
         | MetaValue::OptionalBlockState(id)
         | MetaValue::PaintingVariant(id) => w.write_var_int(&VarInt(*id)),
-        MetaValue::Particle(particle) => write_particle(particle, w),
+        MetaValue::Particle(particle) => PARTICLE.write(w, particle),
         MetaValue::Particles(particles) => {
             w.write_var_int(&VarInt(
                 i32::try_from(particles.len())
                     .map_err(|_| WritingError::Message("too many particles".to_string()))?,
             ))?;
             for particle in particles {
-                write_particle(particle, w)?;
+                PARTICLE.write(w, particle)?;
             }
             Ok(())
         }
     }
 }
 
-fn write_particle(particle: &ParticleValue, w: &mut Vec<u8>) -> Result<(), WritingError> {
-    w.write_var_int(&VarInt(particle.id))?;
-    if let Some(state) = particle.block_state {
-        w.write_var_int(&VarInt(state))?;
-    }
-    w.write_slice(&particle.data)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::rewriter::particle::ParticleData;
+    use pumpkin_data::particle::Particle as ParticleKind;
     use pumpkin_util::version::JavaMinecraftVersion as V;
 
     /// A pig's shared flags, health and absent custom name, in 26.3 numbering.
@@ -354,7 +282,7 @@ mod tests {
     }
 
     fn effect_particle() -> u8 {
-        u8::try_from(Particle::EntityEffect.to_id()).expect("a one byte particle id")
+        u8::try_from(ParticleKind::EntityEffect.to_id()).expect("a one byte particle id")
     }
 
     #[test]
@@ -368,24 +296,37 @@ mod tests {
             panic!("not a particle list");
         };
         assert_eq!(particles.len(), 1);
-        assert_eq!(particles[0].id, i32::from(Particle::EntityEffect.to_id()));
-        assert_eq!(particles[0].data, [0x11, 0x22, 0x33, 0x44]);
+        assert_eq!(
+            particles[0].id,
+            i32::from(ParticleKind::EntityEffect.to_id())
+        );
+        assert_eq!(particles[0].data, ParticleData::Color(0x1122_3344));
         let mut out = Vec::new();
         list.write(&mut out, &entries).unwrap();
         assert_eq!(out, payload);
     }
 
-    /// The colour arrived with 1.20.5, so the entry cannot be expressed below it.
+    /// Core writes the option data of 26.3 whatever the layout, so the colour
+    /// is read below 1.20.5 too and the rewriter decides what becomes of it.
     #[test]
-    fn an_effect_particle_ends_the_list_below_1_20_5() {
+    fn an_effect_particle_is_read_in_the_26_3_form_on_every_layout() {
         let mut payload = vec![10u8, 16, effect_particle()];
         payload.extend([0x11, 0x22, 0x33, 0x44, 8, 0, 1, TERMINATOR]);
-        let mut read: &[u8] = &payload;
-        let entries = EntityDataListT::for_version(V::V_1_20_3)
-            .read(&mut read)
-            .unwrap();
-        assert!(entries.is_empty());
-        assert!(read.is_empty());
+        for layout in [V::V_1_20_3, V::V_26_2] {
+            let mut read: &[u8] = &payload;
+            let entries = EntityDataListT::for_version(layout)
+                .read(&mut read)
+                .unwrap();
+            assert_eq!(entries.len(), 2, "{layout}");
+            assert_eq!(
+                entries[0].value,
+                MetaValue::Particle(Particle {
+                    id: i32::from(ParticleKind::EntityEffect.to_id()),
+                    data: ParticleData::Color(0x1122_3344),
+                })
+            );
+            assert!(read.is_empty());
+        }
     }
 
     /// An empty stack is a single zero varint in the 26.3 form and stays one.

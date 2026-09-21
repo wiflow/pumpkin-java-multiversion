@@ -134,8 +134,7 @@ pub fn translate_serverbound(
     payload: &[u8],
 ) -> Option<Translated> {
     let packet = tables::resolve_serverbound(state, packet_id, version)?;
-    // Core decodes every serverbound packet with the client's own version.
-    let layout = version;
+    let layout = core_layout::core_read_floor(packet, version).max(version);
     let steps = &STEPS[..steps_for(version)];
     let chain = chain();
 

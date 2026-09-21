@@ -8,11 +8,13 @@ use crate::api::types::{BOOL, F32T, F64T, I8T, I32T, I64T, STRING, VAR_INT, Wire
 use crate::api::{ComposedMappings, IdMapping, PacketWrapper, TranslateError, UserConnection};
 
 /// A particle as 26.3 wrote it: the registry id and its option data.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Particle {
     pub id: i32,
     pub data: ParticleData,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum VibrationSource {
     /// The packed block position, copied as it stands.
     Block(i64),
@@ -22,6 +24,7 @@ pub enum VibrationSource {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ParticleData {
     None,
     Block(u32),

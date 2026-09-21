@@ -72,7 +72,6 @@ fn table() -> &'static HashMap<usize, IdPass> {
             &clientbound::play::MERCHANT_OFFERS,
             item_pass::merchant_offers,
         );
-        put(&clientbound::play::COOLDOWN, item_pass::cooldown);
         put(
             &clientbound::play::UPDATE_ADVANCEMENTS,
             item_pass::advancements,

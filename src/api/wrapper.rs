@@ -8,6 +8,7 @@ pub struct Translated {
     pub packet: &'static PacketId,
     pub payload: Vec<u8>,
     pub extra: Vec<(&'static PacketId, Vec<u8>)>,
+    pub replies: Vec<(&'static PacketId, Vec<u8>)>,
 }
 
 pub struct PacketWrapper<'a> {
@@ -17,6 +18,7 @@ pub struct PacketWrapper<'a> {
     output: Vec<u8>,
     cancelled: bool,
     extra: Vec<(&'static PacketId, Vec<u8>)>,
+    replies: Vec<(&'static PacketId, Vec<u8>)>,
 }
 
 impl<'a> PacketWrapper<'a> {
@@ -29,6 +31,7 @@ impl<'a> PacketWrapper<'a> {
             output: Vec::with_capacity(payload.len()),
             cancelled: false,
             extra: Vec::new(),
+            replies: Vec::new(),
         }
     }
 
@@ -102,6 +105,11 @@ impl<'a> PacketWrapper<'a> {
         self.extra.push((packet, payload));
     }
 
+    /// Answers a serverbound packet with one the client gets straight back.
+    pub fn send_reply(&mut self, packet: &'static PacketId, payload: Vec<u8>) {
+        self.replies.push((packet, payload));
+    }
+
     /// Makes what has been written so far the input of the next step. A step
     /// that has not read or written anything leaves the input as it is.
     pub fn reset(&mut self) {
@@ -125,6 +133,7 @@ impl<'a> PacketWrapper<'a> {
             packet: self.packet,
             payload: self.output,
             extra: self.extra,
+            replies: self.replies,
         }))
     }
 }

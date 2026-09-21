@@ -12,7 +12,7 @@ pub use connection::{
     EntityTracker, UserConnection, bind_player, is_bound, remove_connection, remove_player,
     with_connection,
 };
-pub use entity_data::{EntityDataEntry, EntityDataListT, MetaValue, ParticleValue};
+pub use entity_data::{EntityDataEntry, EntityDataListT, MetaValue};
 pub use protocol::{Ctx, Handler, IdPass, Protocol, Registered, Registry};
 pub use types::*;
 pub use wrapper::{PacketWrapper, Translated};
